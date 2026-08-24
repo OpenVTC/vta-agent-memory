@@ -50,8 +50,36 @@ enum Command {
     /// Serve the memory tools over MCP on stdio. The default.
     Serve,
 
-    /// Provision this machine against a VTA you are already logged into with
-    /// `pnm`.
+    /// Phase 1 of enrolment: mint this machine's agent identity and print the
+    /// grant it needs. Needs no credential and no `pnm` — the grant is run by
+    /// somebody holding admin, on any machine.
+    Init {
+        /// The VTA's DID.
+        #[arg(long, value_name = "DID")]
+        vta_did: String,
+        /// The trust context memories will live in. This is the isolation
+        /// boundary: an agent scoped elsewhere cannot see them.
+        #[arg(long, value_name = "ID")]
+        context: String,
+        /// Mediator DID, for a VTA whose DID document does not advertise one
+        /// (a `did:key` VTA, an airgapped deployment).
+        #[arg(long, value_name = "DID")]
+        mediator_did: Option<String>,
+        /// REST URL, likewise.
+        #[arg(long)]
+        url: Option<String>,
+        /// Replace a pending enrolment or an existing config.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Phase 2: connect with the granted identity and keep it. Run this once
+    /// somebody has executed the grant `init` printed.
+    Connect,
+
+    /// Do both phases at once, using a `pnm` login on *this* machine to make
+    /// the grant itself. Convenient, but needs an operator credential here —
+    /// prefer `init` + `connect` otherwise.
     Setup {
         /// Which VTA — its DID (`did:webvh:…`), or the local `pnm` name.
         /// Omit to use whichever VTA `pnm` treats as the default.
@@ -149,6 +177,34 @@ async fn main() -> anyhow::Result<()> {
     };
 
     match cli.command.unwrap_or(Command::Serve) {
+        Command::Init {
+            vta_did,
+            context,
+            mediator_did,
+            url,
+            force,
+        } => {
+            let pending = vta_agent_memory::enrol::init(vta_agent_memory::enrol::InitArgs {
+                vta_did,
+                context_id: context,
+                mediator_did,
+                url,
+                config_path,
+                force,
+            })
+            .await?;
+            print_pending(&pending);
+            Ok(())
+        }
+        Command::Connect => {
+            let outcome = vta_agent_memory::enrol::connect(vta_agent_memory::enrol::ConnectArgs {
+                config_path,
+                recall_limit: 8,
+            })
+            .await?;
+            print_setup_outcome(&outcome);
+            Ok(())
+        }
         Command::Setup {
             vta,
             service_name,
@@ -372,6 +428,21 @@ fn render_memories(context_id: &str, entries: Vec<&record::Entry>, full: bool) -
         out.push('\n');
     }
     out
+}
+
+/// Phase-1 output. The grant command is the deliverable — it is meant to be
+/// copied into a ticket or a chat message and run by somebody else, so it is
+/// printed on its own line, unadorned and unwrapped.
+fn print_pending(p: &vta_agent_memory::enrol::PendingAgent) {
+    println!("This machine's memory agent is ready to be granted access.\n");
+    println!("  agent DID   {}", p.agent_did);
+    println!("  vta         {}", p.vta_did);
+    println!("  context     {}", p.context_id);
+    println!("  mediator    {}", p.mediator_did);
+    println!("\nRun this wherever you hold VTA admin — it does not have to be this machine:\n");
+    println!("  {}\n", p.grant_command());
+    println!("Then, back here:\n");
+    println!("  vta-agent-memory connect");
 }
 
 fn print_setup_outcome(o: &setup::SetupOutcome) {

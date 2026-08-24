@@ -86,6 +86,37 @@ impl Identity {
     }
 }
 
+/// Write `contents` to `path`, creating parents, readable only by its owner.
+///
+/// The permissions are set on the file **before** anything goes into it, not
+/// after: a create-then-chmod leaves a window where a freshly-minted agent key
+/// is world-readable, and that window is exactly when the file is most
+/// interesting. Shared with the pending-enrolment file, which holds the same
+/// key before the config does.
+pub fn write_owner_only(path: &Path, contents: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents.as_bytes())?;
+    }
+    Ok(())
+}
+
 /// The whole config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,36 +174,9 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Write to `path`, creating parents, owner-only.
-    ///
-    /// The permissions are set on the file **before** the secret goes into it,
-    /// not after: a create-then-chmod leaves a window where a
-    /// freshly-provisioned agent key is world-readable, and that window is
-    /// exactly when the file is most interesting.
+    /// Write to `path`, creating parents, owner-only. See [`write_owner_only`].
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)?;
-            f.write_all(json.as_bytes())?;
-            f.sync_all()?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path, json.as_bytes())?;
-        }
-        Ok(())
+        write_owner_only(path, &serde_json::to_string_pretty(self)?)
     }
 
     /// Turn the stored identity into the SDK's connect ladder.
