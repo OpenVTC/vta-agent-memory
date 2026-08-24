@@ -14,8 +14,9 @@
 //!    keyring key **`vta:<slug>`**, not `<slug>` — see `vta_keyring_key` in
 //!    `pnm-cli/src/config.rs`. Neither session backend prefixes anything, so a
 //!    bare slug simply finds no session and reports "Not authenticated" to
-//!    somebody who is, in fact, authenticated. [`ResolvedVta::session_key`] is
-//!    the one place that prefix is applied.
+//!    somebody who is, in fact, authenticated. The rule lives in
+//!    `vta_sdk::agent_connect::pnm_session_key`, which
+//!    [`ResolvedVta::session_key`] delegates to.
 //!
 //! 3. **Endpoints `pnm` was told about.** `VtaConfig` can carry an explicit
 //!    `mediator_did` and `url` for VTAs that cannot advertise a service
@@ -34,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
 use serde::Deserialize;
+use vta_sdk::agent_connect::pnm_session_key;
 
 /// One VTA target as `pnm` records it. Unknown fields are ignored on purpose:
 /// this is a reader of somebody else's file, and it should not break when that
@@ -79,13 +81,13 @@ pub struct ResolvedVta {
 }
 
 impl ResolvedVta {
-    /// The keyring key the session is stored under: `vta:<slug>`.
+    /// The keyring key the session is stored under.
     ///
-    /// Passing the bare slug is the mistake this exists to prevent — it finds
-    /// nothing and reports an authentication failure to someone who is
-    /// authenticated.
+    /// Delegated to [`pnm_session_key`] rather than formatted here. The rule is
+    /// `pnm`'s, not this crate's, and it already caught out one shipped bridge
+    /// (`vta-mcp`, VTI #1083) — a second local copy is how the two drift.
     pub fn session_key(&self) -> String {
-        format!("vta:{}", self.slug)
+        pnm_session_key(&self.slug)
     }
 }
 
@@ -227,9 +229,11 @@ url = "https://vta.corp.example"
 
     #[test]
     fn the_session_key_carries_pnms_vta_prefix() {
-        // The bug this whole module exists for: `pnm` stores under
-        // `vta:<slug>`, and neither session backend prefixes anything, so a
-        // bare slug reports "Not authenticated" to someone who is.
+        // `pnm` stores under `vta:<slug>` and neither session backend prefixes
+        // anything, so a bare slug reports "Not authenticated" to someone who
+        // is. Asserted here as well as in the SDK because this is the call site
+        // that has to be right — the SDK owning the rule does not help if this
+        // module stops asking it.
         let r = two_vtas().resolve(Some("personal")).unwrap();
         assert_eq!(r.session_key(), "vta:personal");
     }
