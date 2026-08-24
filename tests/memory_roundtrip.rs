@@ -379,6 +379,66 @@ async fn a_name_with_no_usable_characters_never_reaches_the_vta() {
     );
 }
 
+/// A sink that answers `list` with a shape the spec does not describe.
+struct DriftedList(Value);
+
+impl LoopbackSink for DriftedList {
+    fn dispatch(&self, _type_uri: &str, _payload: &Value) -> Result<Value, VtaError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn a_re_cased_list_response_is_an_error_not_an_empty_context() {
+    // Casing drift on wire types is the recurring defect class in this stack.
+    // Walking `resp["items"]` by hand would turn this into "you have no
+    // memories" — a wrong answer the user cannot tell from a right one.
+    let store = Store::new(
+        VtaClient::loopback(Arc::new(DriftedList(json!({ "Items": [] })))),
+        "proj",
+    );
+    let err = store.list().await.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("vta/memory/list/0.1"),
+        "the error should name the task whose shape was violated: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn a_list_item_missing_its_value_is_an_error_not_a_skipped_entry() {
+    let store = Store::new(
+        VtaClient::loopback(Arc::new(DriftedList(
+            json!({ "items": [{ "key": "user/name" }] }),
+        ))),
+        "proj",
+    );
+    assert!(
+        store.list().await.is_err(),
+        "a malformed envelope is a bug; silently dropping the entry hides it"
+    );
+}
+
+#[tokio::test]
+async fn a_put_that_echoes_a_different_key_is_refused() {
+    // If the VTA stored something under another key, recall would never find
+    // it and the user would believe the save succeeded.
+    struct WrongKey;
+    impl LoopbackSink for WrongKey {
+        fn dispatch(&self, _uri: &str, _payload: &Value) -> Result<Value, VtaError> {
+            Ok(json!({ "key": "user/something-else" }))
+        }
+    }
+    let store = Store::new(VtaClient::loopback(Arc::new(WrongKey)), "proj");
+    let err = store
+        .save(&record(MemoryType::User, "Name", "d", "b"))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("user/something-else"),
+        "{err:#}"
+    );
+}
+
 #[test]
 fn keys_survive_a_round_trip_through_storage() {
     let key = MemoryKey::new(MemoryType::Feedback, "No PR attribution").unwrap();
