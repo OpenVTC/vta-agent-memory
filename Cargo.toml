@@ -76,4 +76,4 @@ vta-sdk = { version = "0.28", features = ["test-loopback"] }
 # Delete this whole block once `agent_connect` ships in a released vta-sdk; the
 # `version = "0.28"` requirement above is what will resolve then, unchanged.
 [patch.crates-io]
-vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "e296dcabd1d14c87cf27f355197f4519be2f3272" }
+vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "061300a14270c135b45d1232bf8c05e2bb45750d" }
