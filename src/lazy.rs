@@ -165,8 +165,8 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(
             &path,
-            r#"{"version":1,"contextId":"proj",
-                "identity":{"kind":"pnmSession","sessionKey":"vta:x","vtaDid":"did:key:zV"}}"#,
+            r#"{"version":1,"contextId":"proj","identity":{"serviceName":"vta-agent-memory",
+                "sessionKey":"agent:proj","sessionsDir":"/tmp","vtaDid":"did:key:zV"}}"#,
         )
         .unwrap();
 

@@ -191,8 +191,7 @@ async fn main() -> anyhow::Result<()> {
                 url,
                 config_path,
                 force,
-            })
-            .await?;
+            })?;
             print_pending(&pending);
             Ok(())
         }
@@ -433,16 +432,21 @@ fn render_memories(context_id: &str, entries: Vec<&record::Entry>, full: bool) -
 /// Phase-1 output. The grant command is the deliverable — it is meant to be
 /// copied into a ticket or a chat message and run by somebody else, so it is
 /// printed on its own line, unadorned and unwrapped.
-fn print_pending(p: &vta_agent_memory::enrol::PendingAgent) {
-    println!("This machine's memory agent is ready to be granted access.\n");
-    println!("  agent DID   {}", p.agent_did);
+fn print_pending(p: &vta_agent_memory::enrol::PendingEnrolment) {
+    println!("This machine minted a temporary identity and needs it authorized.\n");
+    println!("  temp DID    {}", p.ephemeral_did);
     println!("  vta         {}", p.vta_did);
     println!("  context     {}", p.context_id);
-    println!("  mediator    {}", p.mediator_did);
-    println!("\nRun this wherever you hold VTA admin — it does not have to be this machine:\n");
-    println!("  {}\n", p.grant_command());
-    println!("Then, back here:\n");
+    println!("\nRun these wherever you hold VTA admin — it does not have to be this machine:\n");
+    for c in p.grant_commands() {
+        println!("  {c}");
+    }
+    println!("\nThen, back here:\n");
     println!("  vta-agent-memory connect");
+    println!(
+        "\nThe temporary DID above is rotated away on that first connect, so it stops\n\
+         being an authenticator once it has done its job."
+    );
 }
 
 fn print_setup_outcome(o: &setup::SetupOutcome) {

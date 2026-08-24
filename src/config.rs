@@ -19,69 +19,43 @@ pub const CONFIG_VERSION: u8 = 1;
 
 /// How this machine authenticates to the VTA.
 ///
-/// Mirrors the rungs of `vta_sdk::agent_connect::AgentConnect`, narrowed to the
-/// two a setup flow can actually produce. The bearer-token rung is reachable
-/// from the environment (`VTA_URL` + `VTA_TOKEN`) and deliberately has no
-/// on-disk form — a token is short-lived and does not belong in a config file.
+/// Always a **session in a session store** — never a private key in this file.
+/// The key lives in the OS keyring (or whichever backend the SDK selected), and
+/// for a dedicated agent it is one the VTA has never seen in a paste-able form:
+/// see `crate::enrol` for the rotation that makes that true.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Identity {
-    /// A dedicated agent `did:key`, scoped by its own ACL entry to one context.
-    /// The recommended shape: revoking the agent is `pnm acl delete`, and it
-    /// cannot reach anything the operator's own login can.
-    #[serde(rename_all = "camelCase")]
-    Agent {
-        /// The agent's `did:key`.
-        did: String,
-        /// Its Ed25519 signing key, multibase. Never leaves this process.
-        private_key_multibase: String,
-        /// The VTA this agent authenticates to.
-        vta_did: String,
-        /// The mediator it routes through.
-        mediator_did: String,
-        /// REST fallback URL, when the VTA advertises one.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rest_url: Option<String>,
-    },
-    /// Reuse an existing `pnm` login from the keyring. Stores no key material —
-    /// but authenticates as the *operator*, so the agent inherits the
-    /// operator's whole reach.
-    #[serde(rename_all = "camelCase")]
-    PnmSession {
-        /// The **keyring key**, `vta:<slug>` — not the bare slug. `pnm` stores
-        /// sessions under that prefix and no session backend adds it, so the
-        /// bare slug finds nothing and reports an authentication failure to
-        /// somebody who is authenticated. Resolved once at setup and stored
-        /// whole, so nothing downstream has to remember the rule.
-        session_key: String,
-        /// The VTA's DID. Not used to connect — the session carries that — but
-        /// recorded so `doctor` can say *which* VTA these memories are in
-        /// without the reader having to decode a local nickname.
-        vta_did: String,
-        /// The service name sessions were stored under.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        service_name: Option<String>,
-    },
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    /// Service namespace the session is stored under.
+    pub service_name: String,
+    /// Key within that namespace.
+    pub session_key: String,
+    /// Directory the session backend was opened against. Stored rather than
+    /// derived: the one bug this crate keeps meeting is a path that looked
+    /// obvious and was wrong on somebody else's platform.
+    pub sessions_dir: PathBuf,
+    /// The VTA's DID — the identifier worth writing down, and the only one
+    /// that means anything on another machine.
+    pub vta_did: String,
+    /// True when this reuses the **operator's own** `pnm` login rather than a
+    /// dedicated, context-scoped agent identity. Convenient on a workstation,
+    /// and far more reach than a memory service should have anywhere else.
+    #[serde(default)]
+    pub operator_login: bool,
 }
 
 impl Identity {
-    /// The VTA these memories live in, whichever identity is configured.
-    ///
-    /// Both variants record it, so diagnostics can name the VTA by the
-    /// identifier that means something everywhere rather than by a local
-    /// nickname the reader may never have seen.
+    /// The VTA these memories live in.
     pub fn vta_did(&self) -> &str {
-        match self {
-            Identity::Agent { vta_did, .. } => vta_did,
-            Identity::PnmSession { vta_did, .. } => vta_did,
-        }
+        &self.vta_did
     }
 
     /// Short label for diagnostics.
     pub fn label(&self) -> &'static str {
-        match self {
-            Identity::Agent { .. } => "dedicated agent did:key",
-            Identity::PnmSession { .. } => "pnm session (operator identity)",
+        if self.operator_login {
+            "pnm session (operator identity)"
+        } else {
+            "dedicated agent (rotated)"
         }
     }
 }
@@ -180,35 +154,16 @@ impl Config {
     }
 
     /// Turn the stored identity into the SDK's connect ladder.
+    ///
+    /// Always the session rung, and always with an explicit `sessions_dir` —
+    /// the SDK's default was wrong on macOS and Windows until VTI #1087, and
+    /// resolving it here means this crate never depended on that being right.
     pub fn to_agent_connect(&self) -> vta_sdk::agent_connect::AgentConnect {
-        use vta_sdk::agent_connect::AgentConnect;
-        match &self.identity {
-            Identity::Agent {
-                did,
-                private_key_multibase,
-                vta_did,
-                mediator_did,
-                rest_url,
-            } => AgentConnect {
-                agent_did: Some(did.clone()),
-                agent_key: Some(private_key_multibase.clone()),
-                vta_did: Some(vta_did.clone()),
-                mediator_did: Some(mediator_did.clone()),
-                url: rest_url.clone(),
-                ..Default::default()
-            },
-            Identity::PnmSession {
-                session_key,
-                service_name,
-                ..
-            } => AgentConnect {
-                session_key: Some(session_key.clone()),
-                service_name: service_name.clone(),
-                // `pnm` keeps its sessions beside its config; the SDK's default
-                // is the same path, but saying so keeps the two from drifting.
-                sessions_dir: crate::pnm::PnmConfig::default_dir().ok(),
-                ..Default::default()
-            },
+        vta_sdk::agent_connect::AgentConnect {
+            session_key: Some(self.identity.session_key.clone()),
+            service_name: Some(self.identity.service_name.clone()),
+            sessions_dir: Some(self.identity.sessions_dir.clone()),
+            ..Default::default()
         }
     }
 }
@@ -221,12 +176,12 @@ mod tests {
         Config {
             version: CONFIG_VERSION,
             context_id: "my-project".into(),
-            identity: Identity::Agent {
-                did: "did:key:zAgent".into(),
-                private_key_multibase: "zSecret".into(),
+            identity: Identity {
+                service_name: "vta-agent-memory".into(),
+                session_key: "agent:my-project".into(),
+                sessions_dir: PathBuf::from("/tmp/vam-sessions"),
                 vta_did: "did:webvh:abc:example.com:vta".into(),
-                mediator_did: "did:web:mediator.example".into(),
-                rest_url: Some("https://vta.example".into()),
+                operator_login: false,
             },
             recall_limit: 8,
         }
@@ -239,18 +194,32 @@ mod tests {
         agent_config().save(&path).unwrap();
         let back = Config::load(&path).unwrap();
         assert_eq!(back.context_id, "my-project");
-        assert!(matches!(back.identity, Identity::Agent { .. }));
+        assert_eq!(back.identity.session_key, "agent:my-project");
+        assert!(!back.identity.operator_login);
+    }
+
+    #[test]
+    fn the_config_holds_no_key_material() {
+        // The whole point of routing enrolment through the session store: the
+        // key lives in the OS keyring, and this file only says which session to
+        // open. A regression here would put a private key back in plain JSON.
+        let json = serde_json::to_string(&agent_config()).unwrap();
+        for forbidden in ["privateKey", "private_key", "multibase", "secret"] {
+            assert!(!json.contains(forbidden), "`{forbidden}` in config: {json}");
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn the_config_is_owner_only() {
+        // It no longer holds a key, but it names an identity and a VTA, and
+        // there is no reason for that to be world-readable.
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         agent_config().save(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "it holds an agent private key");
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
@@ -271,34 +240,29 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_identity_maps_onto_the_didkey_rung() {
+    fn every_identity_connects_through_the_session_rung() {
         use vta_sdk::agent_connect::ConnectMode;
-        let mode = agent_config().to_agent_connect().mode().unwrap();
         assert_eq!(
-            mode,
-            ConnectMode::DidKey {
-                agent_did: "did:key:zAgent".into(),
-                mediator_did: "did:web:mediator.example".into(),
+            agent_config().to_agent_connect().mode().unwrap(),
+            ConnectMode::Session {
+                key: "agent:my-project".into()
             }
         );
     }
 
+    /// Session mode must always carry an explicit `sessions_dir`.
+    ///
+    /// `vta_sdk`'s default was `~/.config/pnm` until VTI #1087 — wrong on macOS
+    /// and Windows. This crate resolves the directory itself and records it, so
+    /// it never depended on that being right. Pinned, because a path left to a
+    /// default would find no session on two platforms and report it as an
+    /// authentication failure.
     #[test]
-    fn the_session_identity_maps_onto_the_session_rung() {
-        use vta_sdk::agent_connect::ConnectMode;
-        let cfg = Config {
-            identity: Identity::PnmSession {
-                session_key: "vta:my-vta".into(),
-                vta_did: "did:webvh:abc:example.com:vta".into(),
-                service_name: None,
-            },
-            ..agent_config()
-        };
+    fn the_sessions_dir_is_never_left_to_a_default() {
+        let connect = agent_config().to_agent_connect();
         assert_eq!(
-            cfg.to_agent_connect().mode().unwrap(),
-            ConnectMode::Session {
-                key: "vta:my-vta".into()
-            }
+            connect.sessions_dir.expect("recorded, not derived"),
+            PathBuf::from("/tmp/vam-sessions")
         );
     }
 
@@ -329,11 +293,26 @@ mod tests {
     }
 
     #[test]
+    fn an_operator_login_is_labelled_as_one() {
+        // It is the higher-privilege choice, so diagnostics must not present it
+        // as equivalent to a scoped agent.
+        let mut cfg = agent_config();
+        cfg.identity.operator_login = true;
+        assert!(cfg.identity.label().contains("operator"));
+        assert!(!agent_config().identity.label().contains("operator"));
+    }
+
+    #[test]
     fn recall_limit_defaults_when_absent() {
         let cfg: Config = serde_json::from_str(
-            r#"{"version":1,"contextId":"c","identity":{"kind":"pnmSession","sessionKey":"vta:v","vtaDid":"did:key:zV"}}"#,
+            r#"{"version":1,"contextId":"c","identity":{"serviceName":"s","sessionKey":"k",
+                "sessionsDir":"/tmp","vtaDid":"did:key:zV"}}"#,
         )
         .unwrap();
         assert_eq!(cfg.recall_limit, 8);
+        assert!(
+            !cfg.identity.operator_login,
+            "absent means the safer reading"
+        );
     }
 }
