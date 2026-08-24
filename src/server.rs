@@ -20,6 +20,7 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::lazy::LazyStore;
 use crate::record::{MemoryKey, MemoryRecord, MemoryType};
 use crate::store::Store;
 
@@ -108,25 +109,36 @@ pub struct ListParams {
     pub kind: Option<String>,
 }
 
-/// The MCP server, bound to one store.
+/// The MCP server.
+///
+/// Holds a [`LazyStore`], not a `Store`: the server must exist even when the
+/// VTA does not, or the tools vanish and the model cannot say why. See
+/// `crate::lazy`.
 #[derive(Clone)]
 pub struct MemoryMcp {
-    store: Arc<Store>,
-    /// How this machine authenticates, for `memory_context`. A label only — no
-    /// key material reaches MCP.
-    identity_label: String,
-    /// Default `limit` for recall when the caller does not pass one.
-    recall_limit: usize,
+    lazy: Arc<LazyStore>,
 }
 
 #[tool_router]
 impl MemoryMcp {
-    pub fn new(store: Arc<Store>, identity_label: String, recall_limit: usize) -> Self {
-        Self {
-            store,
-            identity_label,
-            recall_limit,
-        }
+    pub fn new(lazy: Arc<LazyStore>) -> Self {
+        Self { lazy }
+    }
+
+    /// The connected store, or a tool error naming the fix.
+    async fn store(&self) -> Result<&Store, McpError> {
+        self.lazy.store().await.map_err(to_mcp)
+    }
+
+    /// Default `limit` for recall. Falls back rather than failing: a caller who
+    /// asked for a specific limit should not be refused because the config is
+    /// unreadable — the store call underneath will report that properly.
+    async fn recall_limit(&self) -> usize {
+        self.lazy
+            .config()
+            .await
+            .map(|c| c.recall_limit)
+            .unwrap_or(8)
     }
 
     #[tool(
@@ -143,10 +155,10 @@ impl MemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let kind = parse_type(&p.kind)?;
         let record = MemoryRecord::new(kind, &p.name, &p.description, &p.body, p.links);
-        let key = self.store.save(&record).await.map_err(to_mcp)?;
+        let key = self.store().await?.save(&record).await.map_err(to_mcp)?;
         ok_json(serde_json::json!({
             "key": key.to_string(),
-            "contextId": self.store.context_id(),
+            "contextId": self.store().await?.context_id(),
             "saved": true,
         }))
     }
@@ -164,18 +176,19 @@ impl MemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let kind = p.kind.as_deref().map(parse_type).transpose()?;
         let query = p.query.unwrap_or_default();
-        let limit = p.limit.unwrap_or(self.recall_limit).clamp(1, 100);
-        let hits = self
-            .store
-            .recall(&query, kind, limit)
-            .await
-            .map_err(to_mcp)?;
+        let limit = match p.limit {
+            Some(n) => n,
+            None => self.recall_limit().await,
+        }
+        .clamp(1, 100);
+        let store = self.store().await?;
+        let hits = store.recall(&query, kind, limit).await.map_err(to_mcp)?;
         let items: Vec<_> = hits
             .iter()
             .map(|h| h.entry.record.summary(&h.entry.key))
             .collect();
         ok_json(serde_json::json!({
-            "contextId": self.store.context_id(),
+            "contextId": store.context_id(),
             "count": items.len(),
             "memories": items,
         }))
@@ -191,10 +204,13 @@ impl MemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let key =
             MemoryKey::parse(&p.key).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        match self.store.get(&key).await.map_err(to_mcp)? {
+        match self.store().await?.get(&key).await.map_err(to_mcp)? {
             Some(entry) => ok_json(entry.record.full(&entry.key)),
             None => Err(McpError::invalid_params(
-                format!("no memory `{key}` in context `{}`", self.store.context_id()),
+                format!(
+                    "no memory `{key}` in context `{}`",
+                    self.store().await?.context_id()
+                ),
                 None,
             )),
         }
@@ -211,10 +227,10 @@ impl MemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let key =
             MemoryKey::parse(&p.key).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        self.store.forget(&key).await.map_err(to_mcp)?;
+        self.store().await?.forget(&key).await.map_err(to_mcp)?;
         ok_json(serde_json::json!({
             "key": key.to_string(),
-            "contextId": self.store.context_id(),
+            "contextId": self.store().await?.context_id(),
             "forgotten": true,
         }))
     }
@@ -229,11 +245,16 @@ impl MemoryMcp {
         Parameters(p): Parameters<ListParams>,
     ) -> Result<CallToolResult, McpError> {
         let kind = p.kind.as_deref().map(parse_type).transpose()?;
-        let mut entries = self.store.list_of_type(kind).await.map_err(to_mcp)?;
+        let mut entries = self
+            .store()
+            .await?
+            .list_of_type(kind)
+            .await
+            .map_err(to_mcp)?;
         entries.sort_by_key(|e| e.key.to_string());
         let items: Vec<_> = entries.iter().map(|e| e.record.summary(&e.key)).collect();
         ok_json(serde_json::json!({
-            "contextId": self.store.context_id(),
+            "contextId": self.store().await?.context_id(),
             "count": items.len(),
             "memories": items,
         }))
@@ -245,10 +266,26 @@ impl MemoryMcp {
                        stored, or when a memory call is being refused."
     )]
     async fn memory_context(&self) -> Result<CallToolResult, McpError> {
+        // Deliberately answers without connecting. This is the tool somebody
+        // reaches for *because* memory is failing, so needing a working
+        // connection to explain a broken one would make it useless exactly when
+        // it is wanted. Transport is reported only if a connection already
+        // happened to be open.
+        let cfg = self.lazy.config().await.map_err(to_mcp)?;
+        let transport = if self.lazy.is_connected() {
+            match self.lazy.store().await {
+                Ok(s) => Some(format!("{:?}", s.client().trust_task_transport())),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
         ok_json(serde_json::json!({
-            "contextId": self.store.context_id(),
-            "identity": self.identity_label,
-            "trustTaskTransport": format!("{:?}", self.store.client().trust_task_transport()),
+            "vtaDid": cfg.identity.vta_did(),
+            "contextId": cfg.context_id,
+            "identity": cfg.identity.label(),
+            "connected": self.lazy.is_connected(),
+            "trustTaskTransport": transport,
             "note": "Memories are gated on access to this trust context: an agent scoped to \
                      another context cannot read, write, or delete them.",
         }))

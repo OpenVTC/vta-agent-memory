@@ -16,6 +16,7 @@ scripts/install.sh           build + place bin/vta-agent-memory
 src/
   lib.rs       the crate is a library too, so tests/ can reach it
   pnm.rs       resolving which VTA, and where its pnm session actually lives
+  lazy.rs      connect on first use, so the server exists when the VTA doesn't
   main.rs      CLI: serve | setup | recall | list | forget | doctor
   setup.rs     the online provisioning flow
   config.rs    ~/.config/vta-agent-memory/config.json (0600)
@@ -23,7 +24,9 @@ src/
   record.rs    the record shape, key encoding, and recall ranking
   server.rs    the six MCP tools
 tests/
-  memory_roundtrip.rs   Store end-to-end against an in-process fake VTA
+  memory_roundtrip.rs        Store end-to-end against an in-process fake VTA
+  mcp_starts_without_a_vta.rs  the real binary, over stdio, with no VTA
+  hook_contract.rs           the SessionStart hook's contract
 ```
 
 ## Testing
@@ -52,6 +55,18 @@ anywhere outside `doctor`'s diagnostic print, something has gone wrong.
 per failure domain; for operation completion that owner is
 `VtaClient::idempotent`. A hand-rolled loop cannot hold an idempotency key
 stable across attempts, so it turns one retried operation into two operations.
+
+**`serve` must never fail to start.** Claude Code launches it at session start
+and takes what it gets: a process that exits before speaking MCP shows up as *no
+memory tools*, not as a broken memory service, and the model then cannot say
+what is wrong because the tool it would say it with is gone. Connection happens
+on first use (`crate::lazy`), failures reach the model as tool errors, and
+`memory_context` deliberately answers without connecting — it is what somebody
+reaches for *because* memory is failing.
+
+Note the connect future is **not `Send`** (the session rung boxes an error
+across an await inside `SessionStore`), so it is driven on the blocking pool via
+`Handle::block_on`. Awaiting it directly in a tool handler does not compile.
 
 **Always shut the client down.** A DIDComm or TSP `VtaClient` owns a live,
 auto-reconnecting mediator socket that `Drop` cannot close. The mediator permits
