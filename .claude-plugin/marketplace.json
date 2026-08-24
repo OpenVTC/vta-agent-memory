@@ -1,5 +1,6 @@
 {
   "name": "vta-agent-memory",
+  "description": "Agent memory held in your own Verifiable Trust Agent \u2014 context-scoped, audited, and revocable by you.",
   "owner": {
     "name": "OpenVTC"
   },

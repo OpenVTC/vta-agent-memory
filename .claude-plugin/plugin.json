@@ -2,5 +2,15 @@
   "name": "vta-agent-memory",
   "description": "Durable agent memory stored in your own Verifiable Trust Agent, not in the tool. Save and recall facts across sessions, scoped to a VTA trust context you control and can revoke.",
   "version": "0.1.0",
-  "keywords": ["memory", "vta", "verifiable-trust", "didcomm", "trust-tasks"]
+  "keywords": [
+    "memory",
+    "vta",
+    "verifiable-trust",
+    "didcomm",
+    "trust-tasks"
+  ],
+  "author": {
+    "name": "OpenVTC",
+    "url": "https://github.com/OpenVTC"
+  }
 }
