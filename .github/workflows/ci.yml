@@ -1,0 +1,92 @@
+# Build, test and lint every push and pull request.
+#
+# This repo shipped eight PRs with no CI at all — only a DCO check — and the
+# ninth had to fix a `main` that did not compile. Two PRs edited the same test
+# module from branches that did not know about each other; git merged them
+# cleanly because the blocks were textually distinct, and the result referenced
+# an enum variant the other PR had deleted. Nothing noticed until somebody ran
+# `cargo test` locally.
+#
+# That is precisely the failure a semantic check catches and a textual merge
+# cannot, so it runs on `merge_group` too: a PR that was green on its own branch
+# can still break `main` when combined with another.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are failures here. This crate's whole argument is that a memory
+  # service has to be trustworthy about what it does and does not know; a
+  # tolerated warning is a small lie about that.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test
+    # macOS on purpose. Two shipped bugs were platform-specific paths —
+    # `pnm` stores its config under `dirs::config_dir()`, which is
+    # `~/Library/Application Support` here and `~/.config` on Linux — and a
+    # Linux-only matrix would have been green through both.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # The `[patch.crates-io]` git dependency on the VTI workspace is a large
+      # fetch and a long build; caching it is the difference between a usable
+      # CI and one people learn to ignore.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test
+        run: cargo test --all-features
+
+  plugin:
+    name: plugin manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The manifests are what a person meets before any Rust runs. A malformed
+      # `plugin.json` or `.mcp.json` breaks the plugin without breaking the
+      # build, so the build alone would never report it.
+      - name: Validate JSON manifests
+        run: |
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json \
+                   .mcp.json hooks/hooks.json; do
+            echo "checking $f"
+            python3 -c "import json,sys; json.load(open('$f'))"
+          done
+
+      # Every command and skill needs frontmatter to be loaded at all; a missing
+      # `description` makes a command invisible rather than broken.
+      - name: Check command and skill frontmatter
+        run: |
+          fail=0
+          for f in commands/*.md skills/*/SKILL.md; do
+            if ! head -1 "$f" | grep -q '^---$'; then
+              echo "::error file=$f::missing YAML frontmatter"; fail=1; continue
+            fi
+            if ! sed -n '2,/^---$/p' "$f" | grep -q '^description:'; then
+              echo "::error file=$f::frontmatter has no description"; fail=1
+            fi
+          done
+          exit $fail

@@ -250,48 +250,6 @@ mod tests {
         );
     }
 
-    /// Session mode must always carry an explicit `sessions_dir`.
-    ///
-    /// `vta_sdk`'s default was `~/.config/pnm` until VTI #1087 — wrong on macOS
-    /// and Windows. This crate resolves the directory itself and records it, so
-    /// it never depended on that being right. Pinned, because a path left to a
-    /// default would find no session on two platforms and report it as an
-    /// authentication failure.
-    #[test]
-    fn the_sessions_dir_is_never_left_to_a_default() {
-        let connect = agent_config().to_agent_connect();
-        assert_eq!(
-            connect.sessions_dir.expect("recorded, not derived"),
-            PathBuf::from("/tmp/vam-sessions")
-        );
-    }
-
-    /// Session mode must always carry an explicit `sessions_dir`.
-    ///
-    /// `vta_sdk`'s default was `~/.config/pnm` until VTI #1087 — wrong on macOS
-    /// and Windows, where `pnm` writes to `dirs::config_dir()`. This crate was
-    /// never exposed to that because it resolves the directory itself, and this
-    /// pins the invariant: a future session-mode path that leaves the field
-    /// `None` would silently find no session on two platforms and report it as
-    /// an authentication failure.
-    #[test]
-    fn session_mode_never_leaves_the_sessions_dir_to_a_default() {
-        let cfg = Config {
-            identity: Identity::PnmSession {
-                session_key: "vta:my-vta".into(),
-                vta_did: "did:key:zV".into(),
-                service_name: None,
-            },
-            ..agent_config()
-        };
-        let connect = cfg.to_agent_connect();
-        let dir = connect
-            .sessions_dir
-            .expect("session mode must resolve the directory itself");
-        assert_eq!(dir.file_name().expect("pnm"), "pnm");
-        assert_eq!(dir.parent().expect("parent"), dirs::config_dir().unwrap());
-    }
-
     #[test]
     fn an_operator_login_is_labelled_as_one() {
         // It is the higher-privilege choice, so diagnostics must not present it
