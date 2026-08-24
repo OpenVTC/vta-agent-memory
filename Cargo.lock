@@ -4476,7 +4476,7 @@ dependencies = [
 [[package]]
 name = "vta-sdk"
 version = "0.28.0"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?branch=feat%2Fsdk-agent-connect#387985144adbe1e00f833b9417301db95505055b"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=8bd8d982503b938812d4d40baf216cea16c66504#8bd8d982503b938812d4d40baf216cea16c66504"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",

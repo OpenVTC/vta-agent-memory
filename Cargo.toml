@@ -59,11 +59,18 @@ tempfile = "3"
 vta-sdk = { version = "0.28", features = ["test-loopback"] }
 
 # Temporary: `vta_sdk::agent_connect` — the four-rung connect ladder this binary
-# and `vta-mcp` share — is merged on a branch of the VTI workspace but not yet in
-# a published `vta-sdk`. A git patch rather than a path patch so the repo builds
-# for anyone who clones it, not only next to a local checkout.
+# and `vta-mcp` share — is merged to the VTI workspace's main (PR #1081) but
+# crates.io is still on vta-sdk 0.28.0, which predates it. A git patch rather
+# than a path patch so the repo builds for anyone who clones it, not only next
+# to a local checkout.
+#
+# Pinned to the merge commit, not `branch = "main"`: main moves, and a patch
+# that silently follows it turns an unrelated upstream change into a broken
+# build here with nothing in this repo's history to explain it. (The original
+# feature branch was pinned instead, and was deleted on merge — same failure,
+# faster.)
 #
 # Delete this whole block once `agent_connect` ships in a released vta-sdk; the
 # `version = "0.28"` requirement above is what will resolve then, unchanged.
 [patch.crates-io]
-vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", branch = "feat/sdk-agent-connect" }
+vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "8bd8d982503b938812d4d40baf216cea16c66504" }
