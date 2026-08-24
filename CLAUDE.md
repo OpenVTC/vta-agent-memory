@@ -4,6 +4,11 @@ A Claude Code plugin that makes a Verifiable Trust Agent the user's memory
 service. One Rust binary (MCP server + CLI) plus the plugin manifest, skill,
 commands, and hook around it.
 
+> This file is guidance for people **working on this repo**, and is deliberately
+> not plugin context. `claude plugin validate` warns that a root `CLAUDE.md` is
+> not loaded for users of the plugin — correct, and intended: what users need is
+> in `skills/agent-memory/SKILL.md`, which is loaded.
+
 ## Layout
 
 ```
