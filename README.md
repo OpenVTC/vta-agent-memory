@@ -39,37 +39,52 @@ scripts/install.sh          # builds and places bin/vta-agent-memory
 ### Enrol this machine
 
 Two phases, because **the machine holding your memories should not also hold an
-operator credential**. Phase 1 mints an identity and asks for access; somebody
-with admin grants it, from anywhere.
+operator credential** — and because the identity you paste into a ticket should
+stop working once it has been used.
 
 ```bash
 bin/vta-agent-memory init --vta-did did:webvh:… --context agent-memory
 ```
 
 ```
-This machine's memory agent is ready to be granted access.
+This machine minted a temporary identity and needs it authorized.
 
-  agent DID   did:key:z6MkqVfVXEHNu2TZDZX4nV3oGxsZGMAMYhWKNryGVKWniCDA
+  temp DID    did:key:z6Mkoqb2y3jbu6zoPDBoYGzA4j34JwsnToSUNqBgh9W7VebT
   vta         did:webvh:…
   context     agent-memory
-  mediator    did:webvh:…
 
-Run this wherever you hold VTA admin — it does not have to be this machine:
+Run these wherever you hold VTA admin — it does not have to be this machine:
 
-  pnm acl create --did did:key:z6Mkq… --role application --contexts agent-memory --label vta-agent-memory
+  pnm contexts create --id agent-memory --name agent-memory    # skip if it exists
+  pnm acl create --did did:key:z6Mkoqb… --role application --contexts agent-memory --label vta-agent-memory
 
 Then, back here:
 
   vta-agent-memory connect
+
+The temporary DID above is rotated away on that first connect, so it stops
+being an authenticator once it has done its job.
 ```
 
-`init` needs **no credential and no `pnm`**: it mints a key locally and reads
-the mediator out of the VTA's DID document, which is a public lookup. The grant
-line is meant to be pasted into a ticket or a chat message and run by whoever
-holds admin — on another laptop, in CI, in another timezone.
+That last line is the point. This is the same
+**ephemeral `did:key` → ACL grant → auto-rotate on first connect** flow the
+mediator, PNM and the DID-hosting services use, driven through the shared
+`vti_secrets::IntegrationOnboarding` helper rather than reinvented:
 
-`connect` then authenticates as that key, proves it can actually read the
-context, and writes the config. It refuses to write anything until that works.
+- **`init` needs no credential.** It mints a throwaway key, parks it in the
+  session store, and prints the grant. Nothing authenticated is called.
+- **The grant runs anywhere** — another laptop, CI, a colleague reading it off a
+  ticket.
+- **`connect` rotates.** On the first successful authentication the session
+  store atomically swaps the throwaway key for a fresh one, mirrors the ACL
+  entry onto the new DID, and drops the temp one. The DID that travelled through
+  a low-trust channel is no longer live.
+- **No private key is ever written to this tool's config.** It lives in the
+  session backend — the OS keyring, normally — and the config records only which
+  session to open.
+
+`connect` then proves the rotated identity can actually read the context before
+writing anything.
 
 ### Or, if you hold admin on this machine
 
@@ -79,8 +94,9 @@ bin/vta-agent-memory setup --vta did:webvh:…   # a specific one, by DID
 ```
 
 `setup` does both phases at once, making the grant itself through your `pnm`
-login. Convenient — and it needs an operator credential *here*, so prefer
-`init` + `connect` anywhere that matters. `--vta` also accepts the local `pnm`
+login. It runs the **same** onboarding and the same rotation — the convenience
+path is not the less safe one. It does need an operator credential *here*,
+though, so prefer `init` + `connect` anywhere that matters. `--vta` also accepts the local `pnm`
 name, but prefer the DID: a `pnm` name is a nickname chosen on one machine and
 means nothing on any other.
 
@@ -118,10 +134,11 @@ Everything rides a flow the VTI stack already has:
 
 | Step | Existing asset |
 |---|---|
-| Mint an agent identity | `EphemeralSetupKey` — the same helper every VTI two-phase setup uses |
+| Mint, park, rotate | `vti_secrets::IntegrationOnboarding` — the flow the mediator, PNM and DID-hosting share |
 | Find its way in | `resolve_vta_endpoint` against the VTA's DID document |
 | Authorize it | `acl/create`, role `application`, scoped to one context |
-| Prove it | a real `vta/memory/list/0.1` **as the new identity** |
+| Hold the key | the SDK session store (OS keyring), never this tool's config |
+| Prove it | a real `vta/memory/list/0.1` **as the rotated identity** |
 
 `setup` additionally uses `pnm`'s config and keyring session to find the VTA and
 make the grant without a second person.
@@ -211,21 +228,20 @@ as an MCP server: hooks are shell commands, not MCP calls.
 
 ## Configuration
 
-`~/.config/vta-agent-memory/config.json` (override with
-`$VTA_AGENT_MEMORY_CONFIG`), written `0600` because the dedicated-identity form
-holds a private key.
+`dirs::config_dir()/vta-agent-memory/config.json` (override with
+`$VTA_AGENT_MEMORY_CONFIG`), written `0600`. It holds **no key material** — the
+key lives in the session store — only which session to open:
 
 ```jsonc
 {
   "version": 1,
-  "contextId": "my-project",
+  "contextId": "agent-memory",
   "identity": {
-    "kind": "agent",              // or "pnmSession"
-    "did": "did:key:z…",          // the agent; pnmSession has sessionKey instead
-    "privateKeyMultibase": "z…",
+    "serviceName": "vta-agent-memory",
+    "sessionKey": "agent:agent-memory",
+    "sessionsDir": "…/vta-agent-memory",
     "vtaDid": "did:webvh:…",
-    "mediatorDid": "did:web:…",
-    "restUrl": "https://…"
+    "operatorLogin": false
   },
   "recallLimit": 8
 }

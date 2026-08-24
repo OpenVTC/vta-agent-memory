@@ -103,6 +103,14 @@ accepts either and normalises.
 endpoint, so preferring `resolve_vta_endpoint` would fail setup for precisely
 the deployments the operator had already described.
 
+**Enrolment goes through `vti_secrets::IntegrationOnboarding`, never a
+hand-rolled key.** It is the shared ephemeral-`did:key` → ACL-grant →
+auto-rotate-on-first-connect flow the mediator, PNM and DID-hosting use. Two
+properties fall out and both are load-bearing: the DID that gets pasted into a
+ticket stops authenticating after `connect`, and **no private key is ever
+written to this crate's config** — it lives in the session store. If you find
+yourself putting `privateKeyMultibase` in a config struct, stop.
+
 **The machine holding memories must not need an operator credential.** That is
 why `enrol` (init → out-of-band grant → connect) is the primary path and `setup`
 is the same-machine convenience. It mirrors the rest of the stack: *"VTC

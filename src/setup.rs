@@ -32,8 +32,8 @@ use anyhow::{Context as _, bail};
 use vta_sdk::agent_connect::AgentConnect;
 use vta_sdk::client::VtaClient;
 use vta_sdk::prelude::CreateAclRequest;
-use vta_sdk::provision_client::setup_key::EphemeralSetupKey;
 use vta_sdk::session::{VtaEndpoint, resolve_vta_endpoint};
+use vti_secrets::onboarding::IntegrationOnboarding;
 
 use crate::config::{CONFIG_VERSION, Config, Identity};
 use crate::pnm::{PnmConfig, ResolvedVta};
@@ -133,14 +133,22 @@ async fn setup_body(
     let context_id = resolve_context(operator, args.context.as_deref()).await?;
 
     // 4 + 5. Identity.
-    let identity = if args.use_session {
-        Identity::PnmSession {
-            session_key: target.session_key(),
-            vta_did: target.vta_did.clone(),
-            service_name: args.service_name.clone(),
-        }
+    let (identity, agent_did) = if args.use_session {
+        (
+            Identity {
+                service_name: args
+                    .service_name
+                    .clone()
+                    .unwrap_or_else(|| vta_sdk::agent_connect::DEFAULT_SERVICE_NAME.to_string()),
+                session_key: target.session_key(),
+                sessions_dir: crate::pnm::PnmConfig::default_dir()?,
+                vta_did: target.vta_did.clone(),
+                operator_login: true,
+            },
+            None,
+        )
     } else {
-        mint_agent_identity(operator, target, &context_id).await?
+        onboard_dedicated_agent(operator, target, &context_id).await?
     };
 
     // 5. Prove it. Connect as the identity we just chose and do the real thing.
@@ -156,10 +164,6 @@ async fn setup_body(
     cfg.save(&args.config_path)
         .with_context(|| format!("writing {}", args.config_path.display()))?;
 
-    let agent_did = match &cfg.identity {
-        Identity::Agent { did, .. } => Some(did.clone()),
-        Identity::PnmSession { .. } => None,
-    };
     Ok(SetupOutcome {
         config_path: args.config_path.clone(),
         vta_did: target.vta_did.clone(),
@@ -213,26 +217,38 @@ fn render_list(ids: &[String]) -> String {
     }
 }
 
-/// Mint a `did:key`, grant it least-privilege access to one context, and work
-/// out how it reaches the VTA on its own.
-async fn mint_agent_identity(
+/// Mint a throwaway identity, grant it with the operator's own client, then
+/// connect — which rotates it away.
+///
+/// Identical to the two-phase flow in `crate::enrol`; the only difference is
+/// that the grant is made here instead of by somebody else. Routing both
+/// through `IntegrationOnboarding` means the same rotation happens either way,
+/// so the convenience path is not quietly the less safe one.
+async fn onboard_dedicated_agent(
     operator: &VtaClient,
     target: &ResolvedVta,
     context_id: &str,
-) -> anyhow::Result<Identity> {
-    // The same helper every VTI two-phase setup uses to mint a provisioning
-    // key — an Ed25519 did:key with its private half in multibase.
-    let key = EphemeralSetupKey::generate().context("minting the agent did:key")?;
+) -> anyhow::Result<(Identity, Option<String>)> {
+    let sessions_dir = crate::enrol::sessions_dir()?;
+    let session_key = crate::enrol::session_key_for(context_id);
+    let onboarding = IntegrationOnboarding::with_default_backend(
+        crate::enrol::SERVICE_NAME,
+        sessions_dir.clone(),
+        session_key.clone(),
+    );
 
-    // Least privilege, and remote-first: the ACL entry is created before
-    // anything about this identity is written down. If the process dies on the
-    // next line, the operator has an unused ACL entry to delete, which is
-    // visible in `pnm acl list`. The other ordering leaves a config file
-    // holding a key that authorizes nothing, which looks like a bug in the
-    // agent rather than an incomplete setup.
+    let ticket = onboarding
+        .begin(&target.vta_did)
+        .map_err(|e| anyhow::anyhow!("minting the enrolment identity: {e}"))?;
+
+    // Remote-first: the grant lands before anything about this identity is
+    // recorded. If the process dies next line, the operator has an unused ACL
+    // entry visible in `pnm acl list` — the other ordering leaves a config
+    // pointing at a session that authorizes nothing, which reads as a bug in
+    // the agent rather than an incomplete setup.
     operator
         .create_acl(CreateAclRequest {
-            did: key.did.clone(),
+            did: ticket.ephemeral_did().to_string(),
             role: AGENT_ROLE.to_string(),
             label: Some("vta-agent-memory".to_string()),
             allowed_contexts: vec![context_id.to_string()],
@@ -246,28 +262,34 @@ async fn mint_agent_identity(
         .await
         .with_context(|| {
             format!(
-                "granting the memory agent `{}` access to context `{context_id}` \
-                 (needs an operator login with admin over that context)",
-                key.did
+                "granting the memory agent access to context `{context_id}` (needs an operator \
+                 login with admin over that context)"
             )
         })?;
 
-    // Where this identity connects to. `pnm`'s explicitly-configured endpoints
-    // win over the DID document — it records them precisely for VTAs that
-    // *cannot* advertise a service endpoint, which discovery therefore cannot
-    // find.
-    let vta_did = target.vta_did.clone();
-    let (mediator_did, rest_url) =
-        discover_didcomm_endpoint(&vta_did, target.mediator_did.clone(), target.url.clone())
-            .await?;
+    // Connecting rotates the throwaway key away, mirroring the ACL entry onto
+    // a fresh DID and dropping the temp one.
+    let client = onboarding
+        .connect(target.url.as_deref(), target.mediator_did.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("connecting as the new memory agent: {e}"))?;
+    client.shutdown().await;
 
-    Ok(Identity::Agent {
-        did: key.did.clone(),
-        private_key_multibase: key.private_key_multibase().to_string(),
-        vta_did,
-        mediator_did,
-        rest_url,
-    })
+    let rotated_did = onboarding
+        .session_store()
+        .loaded_session(&session_key)
+        .map(|s| s.client_did);
+
+    Ok((
+        Identity {
+            service_name: crate::enrol::SERVICE_NAME.to_string(),
+            session_key,
+            sessions_dir,
+            vta_did: target.vta_did.clone(),
+            operator_login: false,
+        },
+        rotated_did,
+    ))
 }
 
 /// The DIDComm mediator a dedicated agent identity must route through, plus any

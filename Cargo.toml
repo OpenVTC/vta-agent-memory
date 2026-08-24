@@ -39,6 +39,11 @@ vta-sdk = { version = "0.28", features = [
   "acl-setup",
 ] }
 
+# The ephemeral did:key -> ACL grant -> auto-rotate-on-first-connect flow that
+# the mediator, PNM and did-hosting already share. `onboarding` pulls only
+# vta-sdk's session machinery, which is already here.
+vti-secrets = { version = "0.2", default-features = false, features = ["onboarding"] }
+
 rmcp = { version = "3", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
