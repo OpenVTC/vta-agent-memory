@@ -15,6 +15,7 @@ commands/                    /remember /recall /forget /memories
 scripts/install.sh           build + place bin/vta-agent-memory
 src/
   lib.rs       the crate is a library too, so tests/ can reach it
+  pnm.rs       resolving which VTA, and where its pnm session actually lives
   main.rs      CLI: serve | setup | recall | list | forget | doctor
   setup.rs     the online provisioning flow
   config.rs    ~/.config/vta-agent-memory/config.json (0600)
@@ -63,6 +64,23 @@ is the bug to look for.
 `allowed_contexts` list means *unrestricted* for `admin` and *authorized
 nowhere* for every other role. A memory agent must not be one bad edit away from
 reaching every context on the VTA.
+
+**A `pnm` session lives under the keyring key `vta:<slug>`, not `<slug>`.**
+Neither session backend prefixes anything (`vta_keyring_key` in
+`pnm-cli/src/config.rs` is where the prefix is added), so passing a bare slug
+finds no session and reports "Not authenticated" to somebody who is
+authenticated. `ResolvedVta::session_key` is the single place that applies it —
+do not build the key anywhere else.
+
+**A VTA is identified by its DID, not by a `pnm` name.** The name is a nickname
+chosen on one machine and meaningless on any other; every user-facing message
+and every stored config records the DID. `crate::pnm::PnmConfig::resolve`
+accepts either and normalises.
+
+**What `pnm` was configured with beats DID-document discovery.** `pnm` records
+`mediator_did` / `url` exactly for VTAs that *cannot* advertise a service
+endpoint, so preferring `resolve_vta_endpoint` would fail setup for precisely
+the deployments the operator had already described.
 
 **Setup writes nothing until it has connected as the new identity and listed
 memories.** The probe is `memory/list/0.1` specifically, not a cheaper `whoami`:

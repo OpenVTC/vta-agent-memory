@@ -48,8 +48,16 @@ pub enum Identity {
     /// operator's whole reach.
     #[serde(rename_all = "camelCase")]
     PnmSession {
-        /// The `pnm` slug of the login to reuse.
-        vta: String,
+        /// The **keyring key**, `vta:<slug>` — not the bare slug. `pnm` stores
+        /// sessions under that prefix and no session backend adds it, so the
+        /// bare slug finds nothing and reports an authentication failure to
+        /// somebody who is authenticated. Resolved once at setup and stored
+        /// whole, so nothing downstream has to remember the rule.
+        session_key: String,
+        /// The VTA's DID. Not used to connect — the session carries that — but
+        /// recorded so `doctor` can say *which* VTA these memories are in
+        /// without the reader having to decode a local nickname.
+        vta_did: String,
         /// The service name sessions were stored under.
         #[serde(skip_serializing_if = "Option::is_none")]
         service_name: Option<String>,
@@ -57,6 +65,18 @@ pub enum Identity {
 }
 
 impl Identity {
+    /// The VTA these memories live in, whichever identity is configured.
+    ///
+    /// Both variants record it, so diagnostics can name the VTA by the
+    /// identifier that means something everywhere rather than by a local
+    /// nickname the reader may never have seen.
+    pub fn vta_did(&self) -> &str {
+        match self {
+            Identity::Agent { vta_did, .. } => vta_did,
+            Identity::PnmSession { vta_did, .. } => vta_did,
+        }
+    }
+
     /// Short label for diagnostics.
     pub fn label(&self) -> &'static str {
         match self {
@@ -107,7 +127,7 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!(
-                "no memory configuration at {} ({e}).\n\nRun:\n  vta-agent-memory setup --vta <your-pnm-slug>",
+                "no memory configuration at {} ({e}).\n\nRun:\n  vta-agent-memory setup --vta <did:… or pnm name>\n\n(or just `vta-agent-memory setup`, to use your default `pnm` VTA)",
                 path.display()
             )
         })?;
@@ -173,9 +193,16 @@ impl Config {
                 url: rest_url.clone(),
                 ..Default::default()
             },
-            Identity::PnmSession { vta, service_name } => AgentConnect {
-                session_key: Some(vta.clone()),
+            Identity::PnmSession {
+                session_key,
+                service_name,
+                ..
+            } => AgentConnect {
+                session_key: Some(session_key.clone()),
                 service_name: service_name.clone(),
+                // `pnm` keeps its sessions beside its config; the SDK's default
+                // is the same path, but saying so keeps the two from drifting.
+                sessions_dir: crate::pnm::PnmConfig::default_dir().ok(),
                 ..Default::default()
             },
         }
@@ -257,7 +284,8 @@ mod tests {
         use vta_sdk::agent_connect::ConnectMode;
         let cfg = Config {
             identity: Identity::PnmSession {
-                vta: "my-vta".into(),
+                session_key: "vta:my-vta".into(),
+                vta_did: "did:webvh:abc:example.com:vta".into(),
                 service_name: None,
             },
             ..agent_config()
@@ -265,7 +293,7 @@ mod tests {
         assert_eq!(
             cfg.to_agent_connect().mode().unwrap(),
             ConnectMode::Session {
-                key: "my-vta".into()
+                key: "vta:my-vta".into()
             }
         );
     }
@@ -273,7 +301,7 @@ mod tests {
     #[test]
     fn recall_limit_defaults_when_absent() {
         let cfg: Config = serde_json::from_str(
-            r#"{"version":1,"contextId":"c","identity":{"kind":"pnmSession","vta":"v"}}"#,
+            r#"{"version":1,"contextId":"c","identity":{"kind":"pnmSession","sessionKey":"vta:v","vtaDid":"did:key:zV"}}"#,
         )
         .unwrap();
         assert_eq!(cfg.recall_limit, 8);

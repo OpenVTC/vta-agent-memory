@@ -11,6 +11,7 @@
 //! design decisions live. [`store`] is the only module that talks to a VTA.
 
 pub mod config;
+pub mod pnm;
 pub mod record;
 pub mod server;
 pub mod setup;

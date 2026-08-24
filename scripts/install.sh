@@ -42,9 +42,11 @@ echo "Installed ${root}/bin/vta-agent-memory"
 if [[ ! -f "${VTA_AGENT_MEMORY_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/vta-agent-memory/config.json}" ]]; then
   cat <<'EOF'
 
-Not configured yet. Point it at a VTA you are already logged into with `pnm`:
+Not configured yet. It bootstraps from a VTA you have already logged into
+with `pnm` on this machine:
 
-  bin/vta-agent-memory setup --vta <your-pnm-slug>
+  bin/vta-agent-memory setup                      # your default pnm VTA
+  bin/vta-agent-memory setup --vta did:webvh:...  # a specific one, by DID
 
 Then check it:
 
