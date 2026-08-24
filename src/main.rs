@@ -50,11 +50,17 @@ enum Command {
     /// Serve the memory tools over MCP on stdio. The default.
     Serve,
 
-    /// Provision this machine against a VTA you are already logged into.
+    /// Provision this machine against a VTA you are already logged into with
+    /// `pnm`.
     Setup {
-        /// The `pnm` slug of that login.
-        #[arg(long, env = "VTA_AGENT_MEMORY_VTA")]
-        vta: String,
+        /// Which VTA — its DID (`did:webvh:…`), or the local `pnm` name.
+        /// Omit to use whichever VTA `pnm` treats as the default.
+        ///
+        /// Prefer the DID: a `pnm` name is a nickname chosen on this machine
+        /// and means nothing on any other, so a setup instruction written with
+        /// one cannot be copied into a runbook.
+        #[arg(long, env = "VTA_AGENT_MEMORY_VTA", value_name = "DID_OR_NAME")]
+        vta: Option<String>,
         /// Service name the session is stored under (default `pnm-cli`).
         #[arg(long)]
         service_name: Option<String>,
@@ -298,6 +304,7 @@ async fn forget(config_path: &std::path::Path, key: &str) -> anyhow::Result<()> 
 async fn doctor(config_path: &std::path::Path) -> anyhow::Result<()> {
     let cfg = Config::load(config_path)?;
     println!("config      {}", config_path.display());
+    println!("vta         {}", cfg.identity.vta_did());
     println!("context     {}", cfg.context_id);
     println!("identity    {}", cfg.identity.label());
 
@@ -372,6 +379,7 @@ fn render_memories(context_id: &str, entries: Vec<&record::Entry>, full: bool) -
 fn print_setup_outcome(o: &setup::SetupOutcome) {
     println!("Memory service configured.\n");
     println!("  config      {}", o.config_path.display());
+    println!("  vta         {}", o.vta_did);
     println!("  context     {}", o.context_id);
     println!("  identity    {}", o.identity_label);
     if let Some(did) = &o.agent_did {
@@ -445,9 +453,26 @@ mod tests {
         assert!(cli.command.is_none(), "no subcommand means Serve");
     }
 
+    /// `--vta` takes the VTA's DID, its local `pnm` name, or nothing at all
+    /// (meaning `pnm`'s default). The DID is the form worth putting in a
+    /// runbook — a `pnm` name only means something on the machine that chose
+    /// it — so the flag must not insist on either one.
     #[test]
-    fn setup_requires_the_pnm_slug() {
-        assert!(Cli::try_parse_from(["vta-agent-memory", "setup"]).is_err());
-        assert!(Cli::try_parse_from(["vta-agent-memory", "setup", "--vta", "mine"]).is_ok());
+    fn setup_accepts_a_did_a_name_or_nothing() {
+        for args in [
+            vec!["vta-agent-memory", "setup"],
+            vec!["vta-agent-memory", "setup", "--vta", "mine"],
+            vec![
+                "vta-agent-memory",
+                "setup",
+                "--vta",
+                "did:webvh:abc:example.com:vta",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_ok(),
+                "setup should accept {args:?}"
+            );
+        }
     }
 }

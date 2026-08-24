@@ -33,9 +33,21 @@ Needs Rust 1.95+, and a VTA you are already logged into with
 ```bash
 git clone https://github.com/OpenVTC/vta-agent-memory
 cd vta-agent-memory
-scripts/install.sh                       # builds and places bin/vta-agent-memory
-bin/vta-agent-memory setup --vta <your-pnm-slug>
+scripts/install.sh          # builds and places bin/vta-agent-memory
+bin/vta-agent-memory setup  # uses your default `pnm` VTA
 ```
+
+To pick a specific VTA, name it by **DID**:
+
+```bash
+bin/vta-agent-memory setup --vta did:webvh:abc:vta.example.com:mine
+```
+
+`--vta` also accepts the local `pnm` name (`--vta work`), but prefer the DID.
+A `pnm` name is a nickname chosen on one machine at `pnm setup --name`; it means
+nothing on any other, so an instruction written with one cannot be copied into a
+runbook or handed to a colleague. `setup` and `doctor` both print the DID, so
+the value to reuse is always on screen.
 
 Then add the plugin to Claude Code (from a marketplace that lists this repo, or
 by pointing at the checkout).
@@ -46,13 +58,30 @@ Check it any time:
 bin/vta-agent-memory doctor
 ```
 
+```
+config      ~/.config/vta-agent-memory/config.json
+vta         did:webvh:abc:vta.example.com:mine
+context     my-project
+identity    dedicated agent did:key
+transport   Didcomm
+memories    12
+```
+
+### Prerequisite
+
+A VTA you have already logged into with `pnm` on this machine. Setup reads
+`~/.config/pnm/config.toml` to find it and reuses that login's keyring session —
+it never asks for credentials of its own. If `pnm auth status` works, so will
+this; if it doesn't, run `pnm setup` first.
+
 ## What setup does
 
 Everything rides a flow the VTI stack already has:
 
 | Step | Existing asset |
 |---|---|
-| Authenticate as you | your `pnm` keyring session |
+| Find which VTA you mean | `~/.config/pnm/config.toml` — DID, `pnm` name, or its default |
+| Authenticate as you | that login's keyring session (`vta:<name>`) |
 | Find the trust context | `contexts/list/1.0` |
 | Mint an agent identity | `EphemeralSetupKey` (the same helper every VTI two-phase setup uses) |
 | Authorize it | `acl/create`, role `application`, scoped to one context |
@@ -72,9 +101,21 @@ pnm acl delete --did <the agent DID setup printed>
 
 `--use-session` skips the minting and reuses your own login instead. It stores no
 key, but the memory service then inherits your whole reach, and revoking it means
-revoking your login. Use it when the VTA advertises no DIDComm mediator (a
-REST-only VTA), which is the one case where a `did:key` agent has no way to
-connect.
+revoking your login.
+
+Reach for it when the VTA advertises no DIDComm mediator — a REST-only VTA — the
+one case where a `did:key` agent has no way in. If that VTA has a mediator that
+simply isn't in its DID document (a `did:key` VTA, an airgapped one), the better
+fix is to tell `pnm` about it once:
+
+```toml
+# ~/.config/pnm/config.toml
+[vtas.mine]
+mediator_did = "did:web:mediator.example.com"
+```
+
+Setup prefers what `pnm` was configured with over DID-document discovery,
+precisely because discovery cannot find the deployments that need it.
 
 **Online only.** There is no offline/air-gapped setup path.
 
@@ -118,7 +159,7 @@ vault, gated on different capabilities on purpose.
 ## Commands
 
 ```
-vta-agent-memory setup --vta <slug> [--context <id>] [--use-session] [--force]
+vta-agent-memory setup [--vta <did:… | pnm-name>] [--context <id>] [--use-session] [--force]
 vta-agent-memory serve                       # MCP over stdio (the default)
 vta-agent-memory recall [--query Q] [--type T] [--limit N] [--full] [--format text|json]
 vta-agent-memory list [--type T]
@@ -142,7 +183,7 @@ holds a private key.
   "contextId": "my-project",
   "identity": {
     "kind": "agent",              // or "pnmSession"
-    "did": "did:key:z…",
+    "did": "did:key:z…",          // the agent; pnmSession has sessionKey instead
     "privateKeyMultibase": "z…",
     "vtaDid": "did:webvh:…",
     "mediatorDid": "did:web:…",

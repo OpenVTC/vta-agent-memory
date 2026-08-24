@@ -33,9 +33,10 @@ use vta_sdk::agent_connect::AgentConnect;
 use vta_sdk::client::VtaClient;
 use vta_sdk::prelude::CreateAclRequest;
 use vta_sdk::provision_client::setup_key::EphemeralSetupKey;
-use vta_sdk::session::{SessionStore, VtaEndpoint, resolve_vta_endpoint};
+use vta_sdk::session::{VtaEndpoint, resolve_vta_endpoint};
 
 use crate::config::{CONFIG_VERSION, Config, Identity};
+use crate::pnm::{PnmConfig, ResolvedVta};
 
 /// The role granted to a dedicated memory agent.
 ///
@@ -52,6 +53,9 @@ pub const AGENT_ROLE: &str = "application";
 /// What `setup` decided, for printing.
 pub struct SetupOutcome {
     pub config_path: std::path::PathBuf,
+    /// The VTA's DID — what to write down, and what to pass to `--vta` on the
+    /// next machine.
+    pub vta_did: String,
     pub context_id: String,
     pub identity_label: String,
     pub agent_did: Option<String>,
@@ -60,8 +64,9 @@ pub struct SetupOutcome {
 
 /// Inputs, straight off the CLI.
 pub struct SetupArgs {
-    /// `pnm` slug of the operator login to bootstrap from.
-    pub vta: String,
+    /// Which VTA to bootstrap from: its **DID** (the identifier worth writing
+    /// down), or the local `pnm` name. `None` uses `pnm`'s own default.
+    pub vta: Option<String>,
     /// Service name the session is stored under.
     pub service_name: Option<String>,
     /// Trust context for memories. Resolved from the VTA when absent.
@@ -84,20 +89,27 @@ pub async fn run(args: SetupArgs) -> anyhow::Result<SetupOutcome> {
         );
     }
 
-    // 1. Authenticate as the operator, over whatever transport the VTA
+    // 1. Work out *which* VTA, and where its session actually lives. Both are
+    //    `pnm`'s answers to give — see `crate::pnm` for why neither is as
+    //    obvious as it looks.
+    let pnm_dir = PnmConfig::default_dir()?;
+    let target = PnmConfig::load(&pnm_dir)?.resolve(args.vta.as_deref())?;
+
+    // 2. Authenticate as the operator, over whatever transport the VTA
     //    advertises. This is the only privileged connection setup makes.
     let operator = AgentConnect {
-        session_key: Some(args.vta.clone()),
+        session_key: Some(target.session_key()),
         service_name: args.service_name.clone(),
+        sessions_dir: Some(pnm_dir),
         ..Default::default()
     }
     .connect()
     .await
     .with_context(|| {
         format!(
-            "connecting to VTA `{}` with the stored pnm session — run `pnm auth status` to check \
-             it, or `pnm setup` if you have not logged in on this machine",
-            args.vta
+            "connecting to `{}` ({}) with its stored `pnm` session — check it with `pnm auth \
+             status`, or log in again with `pnm setup`",
+            target.slug, target.vta_did
         )
     })?;
 
@@ -105,31 +117,30 @@ pub async fn run(args: SetupArgs) -> anyhow::Result<SetupOutcome> {
     // mediator socket that Drop cannot close. Run the body, then shut down
     // unconditionally before propagating — a bare `?` would leak the socket and
     // leave it duelling the mediator's one-per-DID slot on reconnect.
-    let result = setup_body(&operator, &args).await;
+    let result = setup_body(&operator, &args, &target).await;
     operator.shutdown().await;
     result
 }
 
-async fn setup_body(operator: &VtaClient, args: &SetupArgs) -> anyhow::Result<SetupOutcome> {
-    // 2. Resolve the trust context. This is the isolation boundary for every
+async fn setup_body(
+    operator: &VtaClient,
+    args: &SetupArgs,
+    target: &ResolvedVta,
+) -> anyhow::Result<SetupOutcome> {
+    // 3. Resolve the trust context. This is the isolation boundary for every
     //    memory, so it is chosen explicitly rather than defaulted to something
     //    convenient.
     let context_id = resolve_context(operator, args.context.as_deref()).await?;
 
-    // 3 + 4. Identity.
+    // 4 + 5. Identity.
     let identity = if args.use_session {
         Identity::PnmSession {
-            vta: args.vta.clone(),
+            session_key: target.session_key(),
+            vta_did: target.vta_did.clone(),
             service_name: args.service_name.clone(),
         }
     } else {
-        mint_agent_identity(
-            operator,
-            &args.vta,
-            args.service_name.as_deref(),
-            &context_id,
-        )
-        .await?
+        mint_agent_identity(operator, target, &context_id).await?
     };
 
     // 5. Prove it. Connect as the identity we just chose and do the real thing.
@@ -151,6 +162,7 @@ async fn setup_body(operator: &VtaClient, args: &SetupArgs) -> anyhow::Result<Se
     };
     Ok(SetupOutcome {
         config_path: args.config_path.clone(),
+        vta_did: target.vta_did.clone(),
         context_id,
         identity_label: cfg.identity.label().to_string(),
         agent_did,
@@ -205,8 +217,7 @@ fn render_list(ids: &[String]) -> String {
 /// out how it reaches the VTA on its own.
 async fn mint_agent_identity(
     operator: &VtaClient,
-    vta_slug: &str,
-    service_name: Option<&str>,
+    target: &ResolvedVta,
     context_id: &str,
 ) -> anyhow::Result<Identity> {
     // The same helper every VTI two-phase setup uses to mint a provisioning
@@ -241,24 +252,27 @@ async fn mint_agent_identity(
             )
         })?;
 
-    // Where does this identity connect to? The operator session knows the VTA
-    // DID; the VTA's own DID document knows the rest. Reading it here — rather
-    // than asking the operator for a mediator DID — is what keeps setup to one
-    // flag.
-    let sessions = SessionStore::new(
-        service_name.unwrap_or(vta_sdk::agent_connect::DEFAULT_SERVICE_NAME),
-        default_sessions_dir()?,
-    );
-    let vta_did = sessions
-        .loaded_session(vta_slug)
-        .and_then(|s| s.vta_did)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "the stored pnm session `{vta_slug}` has no VTA DID yet — finish `pnm setup` \
-                 before provisioning a memory agent"
-            )
-        })?;
+    // Where does this identity connect to? Two sources, in this order.
+    //
+    // First, whatever `pnm` was explicitly configured with. It records a
+    // `mediator_did` / `url` precisely for VTAs that *cannot* advertise a
+    // service endpoint — a `did:key` VTA, an airgapped one — so DID-document
+    // discovery is guaranteed to miss exactly the cases that need it most.
+    // Preferring discovery here would fail setup for the deployments the
+    // operator had already taken the trouble to describe.
+    let vta_did = target.vta_did.clone();
+    if let Some(mediator_did) = target.mediator_did.clone() {
+        return Ok(Identity::Agent {
+            did: key.did.clone(),
+            private_key_multibase: key.private_key_multibase().to_string(),
+            vta_did,
+            mediator_did,
+            rest_url: target.url.clone(),
+        });
+    }
 
+    // Otherwise read it out of the VTA's own DID document, which is what keeps
+    // setup to a single flag for an ordinary deployment.
     let (mediator_did, rest_url) = match resolve_vta_endpoint(&vta_did)
         .await
         .map_err(|e| anyhow::anyhow!("resolving the VTA's DID document ({vta_did}): {e}"))?
@@ -279,19 +293,23 @@ async fn mint_agent_identity(
         } => (mediator_did, rest_url),
         VtaEndpoint::Tsp { rest_url, .. } => bail!(
             "this VTA advertises TSP but no DIDComm mediator, so a dedicated agent identity has \
-             no way to connect{}.\n\nUse the operator session instead:\n  \
-             vta-agent-memory setup --vta {vta_slug} --use-session",
+             no way to connect{}.\n\nEither tell `pnm` its mediator (`mediator_did` under \
+             [vtas.{slug}] in ~/.config/pnm/config.toml), or use the operator session:\n  \
+             vta-agent-memory setup --vta {slug} --use-session",
             rest_url
                 .as_deref()
                 .map(|u| format!(
                     " (REST is available at {u}, but a did:key agent authenticates over DIDComm)"
                 ))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            slug = target.slug
         ),
         VtaEndpoint::Rest { url } => bail!(
             "this VTA advertises only REST ({url}), so a dedicated agent identity cannot \
-             authenticate over DIDComm.\n\nUse the operator session instead:\n  \
-             vta-agent-memory setup --vta {vta_slug} --use-session"
+             authenticate over DIDComm.\n\nEither tell `pnm` its mediator (`mediator_did` under \
+             [vtas.{slug}] in ~/.config/pnm/config.toml), or use the operator session:\n  \
+             vta-agent-memory setup --vta {slug} --use-session",
+            slug = target.slug
         ),
         // `VtaEndpoint` is `#[non_exhaustive]`: a transport added upstream
         // arrives here as an unknown variant. Refusing beats guessing — a
@@ -299,7 +317,8 @@ async fn mint_agent_identity(
         _ => bail!(
             "this VTA advertises a transport this build does not know how to give a dedicated \
              agent identity.\n\nUse the operator session instead:\n  \
-             vta-agent-memory setup --vta {vta_slug} --use-session"
+             vta-agent-memory setup --vta {slug} --use-session",
+            slug = target.slug
         ),
     };
 
@@ -308,7 +327,10 @@ async fn mint_agent_identity(
         private_key_multibase: key.private_key_multibase().to_string(),
         vta_did,
         mediator_did,
-        rest_url,
+        // `pnm`'s explicit URL wins over the DID document's, for the same
+        // reason its mediator does: it was configured because discovery is
+        // insufficient for that deployment.
+        rest_url: target.url.clone().or(rest_url),
     })
 }
 
@@ -340,14 +362,6 @@ async fn verify(cfg: &Config) -> anyhow::Result<usize> {
     };
     store.shutdown().await;
     Ok(count)
-}
-
-/// `~/.config/pnm`, matching where `pnm` writes sessions.
-fn default_sessions_dir() -> anyhow::Result<std::path::PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("HOME is not set"))?;
-    Ok(std::path::PathBuf::from(home).join(".config").join("pnm"))
 }
 
 #[cfg(test)]

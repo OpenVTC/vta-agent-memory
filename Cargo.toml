@@ -50,6 +50,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 dirs = "6"
+# Reads `pnm`'s own config.toml — `pnm-cli` is a binary crate with no library
+# target, so there is nothing to depend on for the slug -> VTA-DID mapping.
+toml = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
