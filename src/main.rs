@@ -191,19 +191,17 @@ async fn open(config_path: &std::path::Path) -> anyhow::Result<(Config, Store)> 
 }
 
 async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
-    let (cfg, store) = open(config_path).await?;
+    // Serve unconditionally. Claude Code starts this at session start and takes
+    // what it gets: a process that exits before speaking MCP does not show up as
+    // a broken memory service, it shows up as no memory tools at all, and the
+    // model then has no way to tell anyone why. Connecting happens on first use.
+    let lazy = Arc::new(vta_agent_memory::lazy::LazyStore::new(config_path));
     tracing::info!(
-        context = %cfg.context_id,
-        identity = cfg.identity.label(),
-        "vta-agent-memory connected; serving MCP over stdio"
+        config = %config_path.display(),
+        "serving MCP over stdio; the VTA is contacted on the first memory call"
     );
 
-    let store = Arc::new(store);
-    let mcp = MemoryMcp::new(
-        store.clone(),
-        cfg.identity.label().to_string(),
-        cfg.recall_limit,
-    );
+    let mcp = MemoryMcp::new(lazy.clone());
 
     // Serve, wait, then shut the transport down *however* serving ended. A
     // bare `?` on `waiting()` would skip teardown on the ordinary
@@ -215,7 +213,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    store.client().shutdown().await;
+    lazy.shutdown().await;
     served
 }
 

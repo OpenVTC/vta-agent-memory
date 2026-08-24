@@ -193,11 +193,32 @@ holds a private key.
 }
 ```
 
+## When the VTA is unreachable
+
+The plugin does not disappear. The MCP server starts without contacting the VTA
+and connects on the first memory call, so:
+
+- The six tools are always present, and a failure comes back as a tool error the
+  model can relay — "run `vta-agent-memory setup`" rather than silence.
+- `memory_context` answers *without* connecting, so you can still ask which VTA
+  and context you are pointed at while it is down.
+- Failures are not latched: a VTA that comes back is picked up on the next call,
+  and `setup` run mid-session takes effect without a restart.
+- The `SessionStart` hook stays quiet and exits 0, so a session never fails to
+  start because memory was unavailable.
+
+A session that never touches memory never opens a mediator socket at all.
+
 ## Tests
 
 ```bash
 cargo test
 ```
+
+`tests/mcp_starts_without_a_vta.rs` drives the real binary over stdio with no
+config at all, asserting it completes an MCP handshake, offers all six tools, and
+returns an actionable error from a tool call. That is a property about process
+lifetime, so it can only be observed by running the thing.
 
 `tests/memory_roundtrip.rs` runs the real `VtaClient::memory_*` bodies through
 the SDK's in-process loopback transport into a fake keyspace with the VTA's own
