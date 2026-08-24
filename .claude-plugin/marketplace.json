@@ -1,0 +1,13 @@
+{
+  "name": "vta-agent-memory",
+  "owner": {
+    "name": "OpenVTC"
+  },
+  "plugins": [
+    {
+      "name": "vta-agent-memory",
+      "source": "./",
+      "description": "Durable agent memory stored in your own Verifiable Trust Agent. Memories are context-scoped Trust Tasks on a VTA you control, audited and backed up there, revocable with one `pnm acl delete`."
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "vta-memory": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/vta-agent-memory",
+      "args": ["serve"],
+      "env": {}
+    }
+  }
+}

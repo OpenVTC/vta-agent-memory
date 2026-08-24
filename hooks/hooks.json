@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/vta-agent-memory recall --format json",
+            "timeout": 25
+          }
+        ]
+      }
+    ]
+  }
+}
