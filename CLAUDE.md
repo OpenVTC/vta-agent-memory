@@ -115,6 +115,17 @@ and do not replace it with a copied binary — that is what was broken.
 Its exit code differs by subcommand on purpose: `recall` exits 0 (the
 SessionStart hook must never fail a session), everything else exits 1.
 
+**A plugin-visible fix must bump `version` in `.claude-plugin/plugin.json`.**
+`claude plugin update` compares that version, not the commit, so a fix pushed
+without a bump is unreachable by every install that already exists — it fetches
+the new commit into the marketplace clone, leaves the install pinned to the old
+one, and reports "already at the latest version". The shim commit shipped that
+way, so the fix for *"a marketplace install does not work"* could not be
+installed by anyone whose install did not work. Uninstall + reinstall is the
+only way out, and it is not something a user should have to discover. Keep
+`Cargo.toml`'s version in step: same artifact, and `plugin.json`'s version names
+the install directory.
+
 **Enrolment goes through `vti_secrets::IntegrationOnboarding`, never a
 hand-rolled key.** It is the shared ephemeral-`did:key` → ACL-grant →
 auto-rotate-on-first-connect flow the mediator, PNM and DID-hosting use. Two
