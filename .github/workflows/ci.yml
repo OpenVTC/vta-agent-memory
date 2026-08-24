@@ -76,6 +76,38 @@ jobs:
             python3 -c "import json,sys; json.load(open('$f'))"
           done
 
+      # The shim at bin/ is what `.mcp.json` and the hook actually invoke. It
+      # must be committed and executable: a marketplace install is a fresh
+      # clone with no build artifacts, so if this file is ever gitignored
+      # again — as it was — the plugin installs and does nothing.
+      - name: Check the launcher shim is committed and executable
+        run: |
+          test -x bin/vta-agent-memory \
+            || { echo "::error::bin/vta-agent-memory missing or not executable"; exit 1; }
+          git ls-files --error-unmatch bin/vta-agent-memory > /dev/null \
+            || { echo "::error::bin/vta-agent-memory is not tracked by git"; exit 1; }
+          mode=$(git ls-files -s bin/vta-agent-memory | cut -d' ' -f1)
+          test "$mode" = "100755" \
+            || { echo "::error::bin/vta-agent-memory has git mode $mode, expected 100755"; exit 1; }
+
+      # The paths those manifests point at must exist in a fresh clone, which is
+      # exactly what a marketplace install gives you.
+      - name: Check manifest paths resolve in a clean checkout
+        run: |
+          fail=0
+          for f in .mcp.json hooks/hooks.json; do
+            python3 - "$f" <<'PY' || fail=1
+          import json, os, re, sys
+          raw = open(sys.argv[1]).read()
+          for path in re.findall(r'\$\{CLAUDE_PLUGIN_ROOT\}/([^"\s]+)', raw):
+              if not os.path.exists(path):
+                  print(f"::error file={sys.argv[1]}::{path} does not exist in a clean checkout")
+                  sys.exit(1)
+              print(f"ok {sys.argv[1]} -> {path}")
+          PY
+          done
+          exit $fail
+
       # Every command and skill needs frontmatter to be loaded at all; a missing
       # `description` makes a command invisible rather than broken.
       - name: Check command and skill frontmatter

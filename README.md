@@ -33,8 +33,23 @@ Needs Rust 1.95+, and a VTA you are already logged into with
 ```bash
 git clone https://github.com/OpenVTC/vta-agent-memory
 cd vta-agent-memory
-scripts/install.sh          # builds and places bin/vta-agent-memory
+scripts/install.sh          # cargo install, into ~/.cargo/bin
 ```
+
+Then add it to Claude Code. **Two steps** — `claude plugin install <name>`
+resolves from *configured marketplaces*, so on its own it reports
+"not found in any configured marketplace":
+
+```bash
+claude plugin marketplace add OpenVTC/vta-agent-memory
+claude plugin install vta-agent-memory@vta-agent-memory
+```
+
+The plugin ships Rust source, not a compiled binary, so `bin/vta-agent-memory`
+in the repo is a **shim**: `.mcp.json` and the hook invoke it, and it execs
+whichever real binary `cargo install` produced. That is what makes a
+marketplace install work, where the plugin directory is a fresh clone with no
+build artifacts in it. Override the lookup with `$VTA_AGENT_MEMORY_BIN`.
 
 ### Enrol this machine
 
@@ -99,9 +114,6 @@ path is not the less safe one. It does need an operator credential *here*,
 though, so prefer `init` + `connect` anywhere that matters. `--vta` also accepts the local `pnm`
 name, but prefer the DID: a `pnm` name is a nickname chosen on one machine and
 means nothing on any other.
-
-Then add the plugin to Claude Code (from a marketplace that lists this repo, or
-by pointing at the checkout).
 
 Check it any time:
 
