@@ -22,34 +22,47 @@ if [[ "${1:-}" == "--debug" ]]; then
   profile_flag=""
 fi
 
-echo "Building vta-agent-memory (${profile})…"
-# shellcheck disable=SC2086 # profile_flag is intentionally word-split (may be empty)
-cargo build --manifest-path "${root}/Cargo.toml" ${profile_flag}
+echo "Installing vta-agent-memory (${profile})…"
 
-mkdir -p "${root}/bin"
-built="${root}/target/${profile}/vta-agent-memory"
-if [[ ! -x "${built}" ]]; then
-  echo "error: expected a binary at ${built}" >&2
+# `cargo install` rather than a copy into bin/. bin/ holds a committed shim that
+# finds the binary wherever cargo put it — which is what makes the plugin work
+# when Claude Code installs it from a marketplace, where bin/ is a fresh clone
+# with no compiled artifacts in it.
+if [[ "${profile}" == "debug" ]]; then
+  cargo install --debug --path "${root}" --force
+else
+  cargo install --path "${root}" --force
+fi
+
+installed="${CARGO_HOME:-${HOME}/.cargo}/bin/vta-agent-memory"
+if [[ ! -x "${installed}" ]]; then
+  echo "error: expected a binary at ${installed}" >&2
   exit 1
 fi
+echo "Installed ${installed}"
 
-# Copy rather than symlink: a symlink into `target/` breaks the moment someone
-# runs `cargo clean`, and it breaks silently — the plugin just stops having
-# memory.
-install -m 0755 "${built}" "${root}/bin/vta-agent-memory"
-echo "Installed ${root}/bin/vta-agent-memory"
-
-if [[ ! -f "${VTA_AGENT_MEMORY_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/vta-agent-memory/config.json}" ]]; then
+config="${VTA_AGENT_MEMORY_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/Library/Application Support}/vta-agent-memory/config.json}"
+if [[ ! -f "${config}" ]]; then
   cat <<'EOF'
 
-Not configured yet. It bootstraps from a VTA you have already logged into
-with `pnm` on this machine:
+Enrol this machine. It mints a temporary identity for somebody with VTA admin
+to authorize — they do not have to be on this machine:
 
-  bin/vta-agent-memory setup                      # your default pnm VTA
-  bin/vta-agent-memory setup --vta did:webvh:...  # a specific one, by DID
+  vta-agent-memory init --vta-did <did:…> --context agent-memory
 
-Then check it:
+…then, once the printed grant has been run:
 
-  bin/vta-agent-memory doctor
+  vta-agent-memory connect
+
+If you hold admin here, `vta-agent-memory setup` does both at once.
 EOF
 fi
+
+cat <<'EOF'
+
+Add it to Claude Code (two steps — `install` alone cannot find a plugin whose
+marketplace has not been added):
+
+  claude plugin marketplace add OpenVTC/vta-agent-memory
+  claude plugin install vta-agent-memory@vta-agent-memory
+EOF

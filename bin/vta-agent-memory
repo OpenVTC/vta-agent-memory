@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+#
+# Locate the real `vta-agent-memory` binary and exec it.
+#
+# `.mcp.json` and `hooks/hooks.json` both invoke
+# `${CLAUDE_PLUGIN_ROOT}/bin/vta-agent-memory`, an absolute path inside the
+# plugin directory, because Claude Code launches MCP servers and hooks with an
+# environment that need not match an interactive shell — a plugin that works in
+# the terminal but not when launched is the worst version of this to debug.
+#
+# But when the plugin is installed from a marketplace, that directory is a fresh
+# git clone in Claude's cache, and a compiled binary is not something you commit.
+# So this shim is what lives at that path, and it finds the binary that a
+# `cargo install` put somewhere sensible.
+#
+# Search order, most specific first.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+candidates=(
+  "${VTA_AGENT_MEMORY_BIN:-}"          # explicit override, wins outright
+  "${CARGO_HOME:-$HOME/.cargo}/bin/vta-agent-memory"
+  "$here/../target/release/vta-agent-memory"   # a local checkout, release
+  "$here/../target/debug/vta-agent-memory"     # a local checkout, debug
+)
+
+for c in "${candidates[@]}"; do
+  if [[ -n "$c" && -x "$c" ]]; then
+    exec "$c" "$@"
+  fi
+done
+
+# Last resort: whatever is on PATH, as long as it is not this shim.
+if resolved="$(command -v vta-agent-memory 2>/dev/null)" \
+   && [[ "$resolved" != "$here/vta-agent-memory" ]]; then
+  exec "$resolved" "$@"
+fi
+
+cat >&2 <<'EOF'
+vta-agent-memory: the binary is not installed.
+
+This plugin ships Rust source, not a compiled binary. Build it once:
+
+  cargo install --path <your checkout of OpenVTC/vta-agent-memory>
+
+or set VTA_AGENT_MEMORY_BIN to an existing binary.
+EOF
+
+# Exit code depends on who is asking, because the two callers have opposite
+# contracts. The SessionStart hook must never fail a session — somebody just
+# opened a terminal — so it exits 0 and injects nothing. Everything else,
+# including `serve`, should fail loudly rather than pretend to have worked.
+case "${1:-}" in
+  recall) exit 0 ;;
+  *) exit 1 ;;
+esac

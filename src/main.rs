@@ -459,8 +459,10 @@ fn print_setup_outcome(o: &setup::SetupOutcome) {
         println!("  agent DID   {did}");
     }
     println!("  memories    {} already stored", o.memories_found);
-    println!("\nEnable it in Claude Code:");
-    println!("  claude plugin install vta-agent-memory");
+    println!("\nEnable it in Claude Code (two steps — `install` alone cannot find a");
+    println!("plugin whose marketplace has not been added):");
+    println!("  claude plugin marketplace add OpenVTC/vta-agent-memory");
+    println!("  claude plugin install vta-agent-memory@vta-agent-memory");
     if let Some(did) = &o.agent_did {
         println!("\nTo revoke this machine's access later:");
         println!("  pnm acl delete --did {did}");

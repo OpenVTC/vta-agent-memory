@@ -17,7 +17,8 @@ commands, and hook around it.
 hooks/hooks.json             SessionStart -> `recall --format json`
 skills/agent-memory/         WHEN to save and recall — the policy layer
 commands/                    /remember /recall /forget /memories
-scripts/install.sh           build + place bin/vta-agent-memory
+bin/vta-agent-memory         COMMITTED shim — execs the real cargo-installed binary
+scripts/install.sh           cargo install
 src/
   lib.rs       the crate is a library too, so tests/ can reach it
   enrol.rs     two-phase enrolment (init/connect) — the primary path
@@ -102,6 +103,17 @@ accepts either and normalises.
 `mediator_did` / `url` exactly for VTAs that *cannot* advertise a service
 endpoint, so preferring `resolve_vta_endpoint` would fail setup for precisely
 the deployments the operator had already described.
+
+**`bin/vta-agent-memory` is a committed shell shim, not a build artifact.**
+`.mcp.json` and `hooks.json` invoke `${CLAUDE_PLUGIN_ROOT}/bin/vta-agent-memory`
+because Claude Code's launch environment need not match a shell — but when the
+plugin is installed from a marketplace that directory is a fresh clone with no
+compiled binary in it. The shim resolves the real one (`$VTA_AGENT_MEMORY_BIN`,
+then `~/.cargo/bin`, then a local `target/`, then `PATH`). Do not gitignore it,
+and do not replace it with a copied binary — that is what was broken.
+
+Its exit code differs by subcommand on purpose: `recall` exits 0 (the
+SessionStart hook must never fail a session), everything else exits 1.
 
 **Enrolment goes through `vti_secrets::IntegrationOnboarding`, never a
 hand-rolled key.** It is the shared ephemeral-`did:key` → ACL-grant →
