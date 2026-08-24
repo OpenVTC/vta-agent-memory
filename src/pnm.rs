@@ -92,17 +92,27 @@ impl ResolvedVta {
 }
 
 impl PnmConfig {
-    /// `$PNM_CONFIG_DIR`, else `~/.config/pnm`.
+    /// Where `pnm` keeps its config and sessions.
+    ///
+    /// **`dirs::config_dir()/pnm`, which is not `~/.config/pnm` everywhere.**
+    /// On macOS it is `~/Library/Application Support/pnm`; on Windows it is
+    /// `%APPDATA%\\pnm`. `pnm` itself uses `dirs::config_dir()` (see
+    /// `config_dir` in `pnm-cli/src/config.rs`), so hardcoding the XDG path
+    /// reports "no VTA is configured" to a macOS user who has one — the error
+    /// is about the wrong directory and says nothing about which.
+    ///
+    /// `$PNM_CONFIG_DIR` overrides, for a non-standard install.
     pub fn default_dir() -> anyhow::Result<PathBuf> {
         if let Ok(d) = std::env::var("PNM_CONFIG_DIR")
             && !d.is_empty()
         {
             return Ok(PathBuf::from(d));
         }
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map_err(|_| anyhow::anyhow!("HOME is not set; set PNM_CONFIG_DIR"))?;
-        Ok(PathBuf::from(home).join(".config").join("pnm"))
+        Ok(dirs::config_dir()
+            .ok_or_else(|| {
+                anyhow::anyhow!("could not determine the config directory; set PNM_CONFIG_DIR")
+            })?
+            .join("pnm"))
     }
 
     /// Read `<dir>/config.toml`. A missing file is not an error — it is an
@@ -126,7 +136,12 @@ impl PnmConfig {
     pub fn resolve(&self, wanted: Option<&str>) -> anyhow::Result<ResolvedVta> {
         if self.vtas.is_empty() {
             bail!(
-                "no VTA is configured on this machine.\n\nLog in first:\n  pnm setup --name <name>"
+                "no VTA is configured in {}.\n\nIf `pnm` works but this does not, it is reading \
+                 the wrong directory — point it at the right one with $PNM_CONFIG_DIR.\n\n\
+                 Otherwise log in first:\n  pnm setup --name <name>",
+                Self::default_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|_| "the pnm config directory".into())
             );
         }
 
@@ -310,6 +325,25 @@ vta_did = "did:key:zVta"
 "#);
         let err = c.resolve(None).unwrap_err();
         assert!(err.to_string().contains("--vta"), "{err}");
+    }
+
+    #[test]
+    fn the_default_dir_follows_pnm_rather_than_assuming_xdg() {
+        // `pnm` uses `dirs::config_dir()`, which is NOT `~/.config` on macOS or
+        // Windows. Hardcoding the XDG path told a macOS user with a working
+        // `pnm` that no VTA was configured.
+        let dir = PnmConfig::default_dir().unwrap();
+        assert_eq!(dir.file_name().unwrap(), "pnm");
+        assert_eq!(dir.parent().unwrap(), dirs::config_dir().unwrap());
+    }
+
+    #[test]
+    fn the_config_dir_can_be_overridden() {
+        // Safety: single-threaded test, and the var is removed immediately.
+        unsafe { std::env::set_var("PNM_CONFIG_DIR", "/tmp/elsewhere") };
+        let dir = PnmConfig::default_dir().unwrap();
+        unsafe { std::env::remove_var("PNM_CONFIG_DIR") };
+        assert_eq!(dir, PathBuf::from("/tmp/elsewhere"));
     }
 
     #[test]

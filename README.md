@@ -34,20 +34,55 @@ Needs Rust 1.95+, and a VTA you are already logged into with
 git clone https://github.com/OpenVTC/vta-agent-memory
 cd vta-agent-memory
 scripts/install.sh          # builds and places bin/vta-agent-memory
-bin/vta-agent-memory setup  # uses your default `pnm` VTA
 ```
 
-To pick a specific VTA, name it by **DID**:
+### Enrol this machine
+
+Two phases, because **the machine holding your memories should not also hold an
+operator credential**. Phase 1 mints an identity and asks for access; somebody
+with admin grants it, from anywhere.
 
 ```bash
-bin/vta-agent-memory setup --vta did:webvh:abc:vta.example.com:mine
+bin/vta-agent-memory init --vta-did did:webvh:… --context agent-memory
 ```
 
-`--vta` also accepts the local `pnm` name (`--vta work`), but prefer the DID.
-A `pnm` name is a nickname chosen on one machine at `pnm setup --name`; it means
-nothing on any other, so an instruction written with one cannot be copied into a
-runbook or handed to a colleague. `setup` and `doctor` both print the DID, so
-the value to reuse is always on screen.
+```
+This machine's memory agent is ready to be granted access.
+
+  agent DID   did:key:z6MkqVfVXEHNu2TZDZX4nV3oGxsZGMAMYhWKNryGVKWniCDA
+  vta         did:webvh:…
+  context     agent-memory
+  mediator    did:webvh:…
+
+Run this wherever you hold VTA admin — it does not have to be this machine:
+
+  pnm acl create --did did:key:z6Mkq… --role application --contexts agent-memory --label vta-agent-memory
+
+Then, back here:
+
+  vta-agent-memory connect
+```
+
+`init` needs **no credential and no `pnm`**: it mints a key locally and reads
+the mediator out of the VTA's DID document, which is a public lookup. The grant
+line is meant to be pasted into a ticket or a chat message and run by whoever
+holds admin — on another laptop, in CI, in another timezone.
+
+`connect` then authenticates as that key, proves it can actually read the
+context, and writes the config. It refuses to write anything until that works.
+
+### Or, if you hold admin on this machine
+
+```bash
+bin/vta-agent-memory setup              # your default `pnm` VTA
+bin/vta-agent-memory setup --vta did:webvh:…   # a specific one, by DID
+```
+
+`setup` does both phases at once, making the grant itself through your `pnm`
+login. Convenient — and it needs an operator credential *here*, so prefer
+`init` + `connect` anywhere that matters. `--vta` also accepts the local `pnm`
+name, but prefer the DID: a `pnm` name is a nickname chosen on one machine and
+means nothing on any other.
 
 Then add the plugin to Claude Code (from a marketplace that lists this repo, or
 by pointing at the checkout).
@@ -67,12 +102,15 @@ transport   Didcomm
 memories    12
 ```
 
-### Prerequisite
+### Prerequisites
 
-A VTA you have already logged into with `pnm` on this machine. Setup reads
-`~/.config/pnm/config.toml` to find it and reuses that login's keyring session —
-it never asks for credentials of its own. If `pnm auth status` works, so will
-this; if it doesn't, run `pnm setup` first.
+For `init` + `connect`: the VTA's DID, a trust context, and somebody who can run
+one `pnm acl create`. Nothing else — no `pnm` on this machine.
+
+For `setup`: a VTA you have already logged into with `pnm` **here**. It reads
+`pnm`'s own config (`dirs::config_dir()/pnm` — `~/Library/Application Support/pnm`
+on macOS, not `~/.config`) and reuses that login's keyring session. If
+`pnm auth status` works, so will this.
 
 ## What setup does
 
@@ -80,13 +118,13 @@ Everything rides a flow the VTI stack already has:
 
 | Step | Existing asset |
 |---|---|
-| Find which VTA you mean | `~/.config/pnm/config.toml` — DID, `pnm` name, or its default |
-| Authenticate as you | that login's keyring session (`vta:<name>`) |
-| Find the trust context | `contexts/list/1.0` |
-| Mint an agent identity | `EphemeralSetupKey` (the same helper every VTI two-phase setup uses) |
+| Mint an agent identity | `EphemeralSetupKey` — the same helper every VTI two-phase setup uses |
+| Find its way in | `resolve_vta_endpoint` against the VTA's DID document |
 | Authorize it | `acl/create`, role `application`, scoped to one context |
-| Find its way back in | `resolve_vta_endpoint` against the VTA's DID document |
 | Prove it | a real `vta/memory/list/0.1` **as the new identity** |
+
+`setup` additionally uses `pnm`'s config and keyring session to find the VTA and
+make the grant without a second person.
 
 Nothing is written to disk until that last step passes. A config that has never
 been exercised is a config that fails later, in a hook, with nobody watching.

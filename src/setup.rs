@@ -252,33 +252,53 @@ async fn mint_agent_identity(
             )
         })?;
 
-    // Where does this identity connect to? Two sources, in this order.
-    //
-    // First, whatever `pnm` was explicitly configured with. It records a
-    // `mediator_did` / `url` precisely for VTAs that *cannot* advertise a
-    // service endpoint — a `did:key` VTA, an airgapped one — so DID-document
-    // discovery is guaranteed to miss exactly the cases that need it most.
-    // Preferring discovery here would fail setup for the deployments the
-    // operator had already taken the trouble to describe.
+    // Where this identity connects to. `pnm`'s explicitly-configured endpoints
+    // win over the DID document — it records them precisely for VTAs that
+    // *cannot* advertise a service endpoint, which discovery therefore cannot
+    // find.
     let vta_did = target.vta_did.clone();
-    if let Some(mediator_did) = target.mediator_did.clone() {
-        return Ok(Identity::Agent {
-            did: key.did.clone(),
-            private_key_multibase: key.private_key_multibase().to_string(),
-            vta_did,
-            mediator_did,
-            rest_url: target.url.clone(),
-        });
+    let (mediator_did, rest_url) =
+        discover_didcomm_endpoint(&vta_did, target.mediator_did.clone(), target.url.clone())
+            .await?;
+
+    Ok(Identity::Agent {
+        did: key.did.clone(),
+        private_key_multibase: key.private_key_multibase().to_string(),
+        vta_did,
+        mediator_did,
+        rest_url,
+    })
+}
+
+/// The DIDComm mediator a dedicated agent identity must route through, plus any
+/// REST fallback.
+///
+/// `mediator_override` / `url_override` win outright. They exist for VTAs that
+/// **cannot** advertise a service endpoint — a `did:key` VTA, an airgapped
+/// deployment — so preferring discovery would fail for exactly the cases that
+/// need them. When absent, the VTA's own DID document is read, which keeps an
+/// ordinary deployment to no endpoint flags at all.
+///
+/// Resolving a DID document is a public read, so this works before anybody has
+/// granted this machine anything — which is what lets phase-1 enrolment run
+/// with no credential.
+pub async fn discover_didcomm_endpoint(
+    vta_did: &str,
+    mediator_override: Option<String>,
+    url_override: Option<String>,
+) -> anyhow::Result<(String, Option<String>)> {
+    if let Some(mediator_did) = mediator_override {
+        return Ok((mediator_did, url_override));
     }
 
-    // Otherwise read it out of the VTA's own DID document, which is what keeps
-    // setup to a single flag for an ordinary deployment.
-    let (mediator_did, rest_url) = match resolve_vta_endpoint(&vta_did)
+    let advice = "Supply it explicitly with --mediator-did (or, if you bootstrap from a `pnm` \
+                  login, set `mediator_did` under that VTA in pnm's config.toml).";
+    let (mediator_did, rest_url) = match resolve_vta_endpoint(vta_did)
         .await
         .map_err(|e| anyhow::anyhow!("resolving the VTA's DID document ({vta_did}): {e}"))?
     {
         // A dedicated agent authenticates over DIDComm, so it needs a mediator.
-        // A TSP-advertising VTA still has to give us its DIDComm mediator: the
+        // A TSP-advertising VTA still has to give us its DIDComm one: the
         // client's TSP leg rides an existing DIDComm session, so there is no
         // TSP-only way in for this identity.
         VtaEndpoint::DIDComm {
@@ -293,45 +313,27 @@ async fn mint_agent_identity(
         } => (mediator_did, rest_url),
         VtaEndpoint::Tsp { rest_url, .. } => bail!(
             "this VTA advertises TSP but no DIDComm mediator, so a dedicated agent identity has \
-             no way to connect{}.\n\nEither tell `pnm` its mediator (`mediator_did` under \
-             [vtas.{slug}] in ~/.config/pnm/config.toml), or use the operator session:\n  \
-             vta-agent-memory setup --vta {slug} --use-session",
+             no way to connect{}.\n\n{advice}",
             rest_url
                 .as_deref()
                 .map(|u| format!(
                     " (REST is available at {u}, but a did:key agent authenticates over DIDComm)"
                 ))
-                .unwrap_or_default(),
-            slug = target.slug
+                .unwrap_or_default()
         ),
         VtaEndpoint::Rest { url } => bail!(
             "this VTA advertises only REST ({url}), so a dedicated agent identity cannot \
-             authenticate over DIDComm.\n\nEither tell `pnm` its mediator (`mediator_did` under \
-             [vtas.{slug}] in ~/.config/pnm/config.toml), or use the operator session:\n  \
-             vta-agent-memory setup --vta {slug} --use-session",
-            slug = target.slug
+             authenticate over DIDComm.\n\n{advice}"
         ),
         // `VtaEndpoint` is `#[non_exhaustive]`: a transport added upstream
         // arrives here as an unknown variant. Refusing beats guessing — a
         // dedicated identity needs a mediator DID this arm cannot supply.
         _ => bail!(
             "this VTA advertises a transport this build does not know how to give a dedicated \
-             agent identity.\n\nUse the operator session instead:\n  \
-             vta-agent-memory setup --vta {slug} --use-session",
-            slug = target.slug
+             agent identity.\n\n{advice}"
         ),
     };
-
-    Ok(Identity::Agent {
-        did: key.did.clone(),
-        private_key_multibase: key.private_key_multibase().to_string(),
-        vta_did,
-        mediator_did,
-        // `pnm`'s explicit URL wins over the DID document's, for the same
-        // reason its mediator does: it was configured because discovery is
-        // insufficient for that deployment.
-        rest_url: target.url.clone().or(rest_url),
-    })
+    Ok((mediator_did, url_override.or(rest_url)))
 }
 
 /// Connect as the configured identity and list memories.
@@ -340,7 +342,7 @@ async fn mint_agent_identity(
 /// is the operation gated on exactly what setup just arranged: access to the
 /// chosen context. A successful `whoami` proves the key authenticates and
 /// nothing about whether it can reach the memories.
-async fn verify(cfg: &Config) -> anyhow::Result<usize> {
+pub async fn verify(cfg: &Config) -> anyhow::Result<usize> {
     let client =
         cfg.to_agent_connect().connect().await.with_context(|| {
             format!("connecting as the {} just configured", cfg.identity.label())

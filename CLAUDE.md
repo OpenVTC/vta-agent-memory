@@ -20,6 +20,7 @@ commands/                    /remember /recall /forget /memories
 scripts/install.sh           build + place bin/vta-agent-memory
 src/
   lib.rs       the crate is a library too, so tests/ can reach it
+  enrol.rs     two-phase enrolment (init/connect) — the primary path
   pnm.rs       resolving which VTA, and where its pnm session actually lives
   lazy.rs      connect on first use, so the server exists when the VTA doesn't
   main.rs      CLI: serve | setup | recall | list | forget | doctor
@@ -101,6 +102,18 @@ accepts either and normalises.
 `mediator_did` / `url` exactly for VTAs that *cannot* advertise a service
 endpoint, so preferring `resolve_vta_endpoint` would fail setup for precisely
 the deployments the operator had already described.
+
+**The machine holding memories must not need an operator credential.** That is
+why `enrol` (init → out-of-band grant → connect) is the primary path and `setup`
+is the same-machine convenience. It mirrors the rest of the stack: *"VTC
+deliberately never holds a VTA admin credential (no self-grant), same as
+mediator / did-hosting."* Phase 1 makes no authenticated call at all — a DID
+document is a public read — so it works before anybody has granted anything.
+
+**`pnm`'s config is at `dirs::config_dir()/pnm`, not `~/.config/pnm`.** On macOS
+that is `~/Library/Application Support/pnm`. Hardcoding the XDG path told a
+macOS user with a working `pnm` that no VTA was configured. `vta-sdk`'s
+`agent_connect::default_sessions_dir` still has this bug.
 
 **Setup writes nothing until it has connected as the new identity and listed
 memories.** The probe is `memory/list/0.1` specifically, not a cheaper `whoami`:
