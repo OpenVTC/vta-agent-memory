@@ -221,19 +221,44 @@ async fn recall(
     format: OutputFormat,
     full: bool,
 ) -> anyhow::Result<()> {
-    let (cfg, store) = open(config_path).await?;
-    let kind = parse_kind(kind.as_deref())?;
-    let limit = limit.unwrap_or(cfg.recall_limit);
-    let result = store.recall(&query.unwrap_or_default(), kind, limit).await;
-    let hits = finish(store, result).await?;
+    // `--format json` is the hook path, and a hook has a different contract
+    // from a command a person ran. Two consequences, both deliberate:
+    //
+    // 1. **Never fail the session.** An unreachable VTA, an expired grant, a
+    //    machine that has not been set up — none of those are reasons to put an
+    //    error in front of someone who just opened a terminal. Report to stderr
+    //    and exit 0 with no context.
+    // 2. **Say nothing when there is nothing.** Injecting "no memories stored"
+    //    into every session is noise that never becomes signal.
+    //
+    // The text path keeps ordinary CLI behaviour: a person who ran `recall`
+    // wants to know it failed, and wants to be told the context is empty.
+    let hook_mode = format == OutputFormat::Json;
 
-    let body = render_memories(
-        &cfg.context_id,
-        hits.iter().map(|h| &h.entry).collect::<Vec<_>>(),
-        full,
-    );
+    let outcome = async {
+        let (cfg, store) = open(config_path).await?;
+        let kind = parse_kind(kind.as_deref())?;
+        let limit = limit.unwrap_or(cfg.recall_limit);
+        let result = store.recall(&query.unwrap_or_default(), kind, limit).await;
+        let hits = finish(store, result).await?;
+        let entries: Vec<_> = hits.iter().map(|h| &h.entry).collect();
+        let empty = entries.is_empty();
+        Ok::<_, anyhow::Error>((render_memories(&cfg.context_id, entries, full), empty))
+    }
+    .await;
+
+    let (body, empty) = match outcome {
+        Ok(v) => v,
+        Err(e) if hook_mode => {
+            tracing::warn!(error = %format!("{e:#}"), "memory recall unavailable; starting without it");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
     match format {
         OutputFormat::Text => println!("{body}"),
+        OutputFormat::Json if empty => {}
         OutputFormat::Json => {
             // The envelope Claude Code reads for SessionStart hooks.
             let out = serde_json::json!({
