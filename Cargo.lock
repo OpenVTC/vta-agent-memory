@@ -4525,7 +4525,7 @@ dependencies = [
 [[package]]
 name = "vta-sdk"
 version = "0.28.0"
-source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=e296dcabd1d14c87cf27f355197f4519be2f3272#e296dcabd1d14c87cf27f355197f4519be2f3272"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=061300a14270c135b45d1232bf8c05e2bb45750d#061300a14270c135b45d1232bf8c05e2bb45750d"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -4546,6 +4546,7 @@ dependencies = [
  "curve25519-dalek",
  "dbus-secret-service-keyring-store",
  "didwebvh-rs",
+ "dirs",
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.4.3",
