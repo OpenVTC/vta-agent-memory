@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod enrol;
+pub mod fence;
 pub mod lazy;
 pub mod pnm;
 pub mod record;

@@ -29,6 +29,7 @@
 //! lives here. That belongs in `vta/app-state/*/1.0`, which is versioned,
 //! namespaced, and has a change feed.
 
+use crate::fence::Fence;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -275,21 +276,30 @@ impl MemoryRecord {
     }
 
     /// The compact form recall returns: enough to decide, not enough to cost.
+    /// The compact form `memory_recall` returns.
+    ///
+    /// Author-supplied strings are passed through [`Fence::sanitize`]: a JSON
+    /// field is still text once a model reads it, so a `description` carrying
+    /// a delimiter shape could otherwise appear to close the fence the caller
+    /// wrapped this payload in. Sanitizing at the projection means every
+    /// consumer of `summary`/`full` inherits it. (F8.)
     pub fn summary(&self, key: &MemoryKey) -> serde_json::Value {
         serde_json::json!({
             "key": key.to_string(),
-            "name": self.name,
+            "name": Fence::sanitize(&self.name),
             "type": self.kind.as_str(),
-            "description": self.description,
+            "description": Fence::sanitize(&self.description),
             "links": self.links,
             "updatedAt": self.updated_at,
+            // Stated on every projection so a reader never has to infer it.
+            "trust": "untrusted-data",
         })
     }
 
     /// The full form `memory_get` returns.
     pub fn full(&self, key: &MemoryKey) -> serde_json::Value {
         let mut v = self.summary(key);
-        v["body"] = serde_json::Value::String(self.body.clone());
+        v["body"] = serde_json::Value::String(Fence::sanitize(&self.body));
         v
     }
 }
