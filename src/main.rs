@@ -25,6 +25,7 @@ use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
 use vta_agent_memory::config::Config;
+use vta_agent_memory::fence::{Fence, Provenance};
 use vta_agent_memory::record::{self, MemoryKey, MemoryType};
 use vta_agent_memory::server::MemoryMcp;
 use vta_agent_memory::setup;
@@ -405,6 +406,11 @@ fn render_memories(context_id: &str, entries: Vec<&record::Entry>, full: bool) -
     if entries.is_empty() {
         return format!("No memories stored in trust context `{context_id}`.");
     }
+    // Recalled text is data, not instructions (F8). A context can have more
+    // than one writer, and memories are routinely saved from material this
+    // machine did not author, so everything below the preamble is fenced with
+    // a nonce the content cannot predict. See `fence`.
+    let fence = Fence::new(Provenance::Context);
     let mut out = format!(
         "# Stored memories ({} in trust context `{context_id}`)\n",
         entries.len()
@@ -426,7 +432,7 @@ fn render_memories(context_id: &str, entries: Vec<&record::Entry>, full: bool) -
         }
         out.push('\n');
     }
-    out
+    fence.wrap(&out)
 }
 
 /// Phase-1 output. The grant command is the deliverable — it is meant to be
