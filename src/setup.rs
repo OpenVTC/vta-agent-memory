@@ -258,6 +258,12 @@ async fn onboard_dedicated_agent(
             approve_all_contexts: false,
             approve_contexts: Vec::new(),
             allowed_keys: None,
+            // Empty leaves the entry holding everything `AGENT_ROLE` implies,
+            // which is what it held before the member existed. Narrowing it to
+            // the capabilities this plugin actually exercises is worth doing,
+            // but it is a change to the grant rather than to the pin, so it
+            // does not belong in a dependency alignment.
+            capabilities: Vec::new(),
         })
         .await
         .with_context(|| {
