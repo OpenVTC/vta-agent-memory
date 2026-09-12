@@ -58,6 +58,44 @@ impl Identity {
             "dedicated agent (rotated)"
         }
     }
+
+    /// Refuse an operator login unless this process has opted in to it.
+    ///
+    /// The MCP server and the `SessionStart` hook run unattended in every
+    /// session and act with whatever the configured identity can reach. For a
+    /// dedicated agent that is one trust context. For an operator login it is
+    /// everything the operator can do on the VTA. So that mode needs an
+    /// explicit opt-in in the environment it runs in, not just a config file
+    /// that was written once.
+    pub fn ensure_permitted(&self, allow_operator_login: bool) -> anyhow::Result<()> {
+        if self.operator_login && !allow_operator_login {
+            anyhow::bail!(
+                "this memory config reuses the operator's own `pnm` login (written by `setup \
+                 --use-session`), which gives the memory service everything that login can \
+                 reach. It is refused unless {ALLOW_OPERATOR_LOGIN_ENV}=1 is set in the \
+                 environment this runs in.\n\nTo switch to a dedicated agent scoped to one trust \
+                 context instead:\n  vta-agent-memory setup --force"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Set to `1` to let the MCP server and the connecting CLI commands use an
+/// operator-login config. See [`Identity::ensure_permitted`].
+pub const ALLOW_OPERATOR_LOGIN_ENV: &str = "VTA_AGENT_MEMORY_ALLOW_OPERATOR_LOGIN";
+
+/// Whether [`ALLOW_OPERATOR_LOGIN_ENV`] is set to opt in.
+pub fn operator_login_allowed_by_env() -> bool {
+    is_opt_in(std::env::var(ALLOW_OPERATOR_LOGIN_ENV).ok().as_deref())
+}
+
+/// `1` or `true` (any case) opts in. Anything else, including unset, does not.
+fn is_opt_in(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        v == "1" || v.eq_ignore_ascii_case("true")
+    })
 }
 
 /// Write `contents` to `path`, creating parents, readable only by its owner.
@@ -272,5 +310,31 @@ mod tests {
             !cfg.identity.operator_login,
             "absent means the safer reading"
         );
+    }
+
+    #[test]
+    fn an_operator_login_needs_the_explicit_opt_in() {
+        // A dedicated agent needs nothing.
+        assert!(agent_config().identity.ensure_permitted(false).is_ok());
+
+        let mut cfg = agent_config();
+        cfg.identity.operator_login = true;
+        let err = cfg.identity.ensure_permitted(false).unwrap_err();
+        assert!(
+            err.to_string().contains(ALLOW_OPERATOR_LOGIN_ENV),
+            "the refusal must name the opt-in: {err}"
+        );
+        assert!(cfg.identity.ensure_permitted(true).is_ok());
+    }
+
+    #[test]
+    fn only_an_affirmative_value_opts_in() {
+        for yes in ["1", "true", "TRUE", " 1 "] {
+            assert!(is_opt_in(Some(yes)), "{yes:?}");
+        }
+        for no in ["", "0", "false", "no", "yes please"] {
+            assert!(!is_opt_in(Some(no)), "{no:?}");
+        }
+        assert!(!is_opt_in(None));
     }
 }

@@ -24,12 +24,21 @@ use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
-use vta_agent_memory::config::Config;
+use vta_agent_memory::config::{ALLOW_OPERATOR_LOGIN_ENV, Config, operator_login_allowed_by_env};
 use vta_agent_memory::fence::{Fence, Provenance};
 use vta_agent_memory::record::{self, MemoryKey, MemoryType};
 use vta_agent_memory::server::MemoryMcp;
 use vta_agent_memory::setup;
 use vta_agent_memory::store::Store;
+
+/// The most the `SessionStart` hook puts into a session's context, in bytes,
+/// preamble and delimiters included. Saves are bounded, but a context can hold
+/// hundreds of memories, including ones stored before those bounds existed or
+/// written by another tool, so the rendered total needs a bound of its own.
+const MAX_HOOK_CONTEXT_BYTES: usize = 32 * 1024;
+
+/// Room kept free for the truncation marker, so adding it cannot break the cap.
+const TRUNCATION_MARKER_RESERVE: usize = 256;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -99,7 +108,9 @@ enum Command {
         context: Option<String>,
         /// Authenticate as the operator's own `pnm` session instead of minting
         /// a dedicated, context-scoped agent identity. Stores no key, but the
-        /// memory service then inherits the operator's whole reach.
+        /// memory service then inherits the operator's whole reach, so the
+        /// server and hook refuse such a config unless
+        /// `VTA_AGENT_MEMORY_ALLOW_OPERATOR_LOGIN=1` is set.
         #[arg(long)]
         use_session: bool,
         /// Replace an existing config.
@@ -239,8 +250,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Open the configured store. Every non-setup subcommand starts here.
+///
+/// An operator-login config is refused before connecting unless the
+/// environment opts in (see `Identity::ensure_permitted`).
 async fn open(config_path: &std::path::Path) -> anyhow::Result<(Config, Store)> {
     let cfg = Config::load(config_path)?;
+    cfg.identity
+        .ensure_permitted(operator_login_allowed_by_env())?;
     let client = cfg.to_agent_connect().connect().await?;
     let store = Store::new(client, cfg.context_id.clone());
     Ok((cfg, store))
@@ -282,7 +298,7 @@ async fn recall(
     full: bool,
 ) -> anyhow::Result<()> {
     // `--format json` is the hook path, and a hook has a different contract
-    // from a command a person ran. Two consequences, both deliberate:
+    // from a command a person ran. Three consequences, all deliberate:
     //
     // 1. **Never fail the session.** An unreachable VTA, an expired grant, a
     //    machine that has not been set up — none of those are reasons to put an
@@ -290,6 +306,8 @@ async fn recall(
     //    and exit 0 with no context.
     // 2. **Say nothing when there is nothing.** Injecting "no memories stored"
     //    into every session is noise that never becomes signal.
+    // 3. **Bound what is injected.** It lands in the context before the user
+    //    has typed anything, so it is capped at `MAX_HOOK_CONTEXT_BYTES`.
     //
     // The text path keeps ordinary CLI behaviour: a person who ran `recall`
     // wants to know it failed, and wants to be told the context is empty.
@@ -303,7 +321,8 @@ async fn recall(
         let hits = finish(store, result).await?;
         let entries: Vec<_> = hits.iter().map(|h| &h.entry).collect();
         let empty = entries.is_empty();
-        Ok::<_, anyhow::Error>((render_memories(&cfg.context_id, entries, full), empty))
+        let cap = hook_mode.then_some(MAX_HOOK_CONTEXT_BYTES);
+        Ok::<_, anyhow::Error>((render_memories(&cfg.context_id, entries, full, cap), empty))
     }
     .await;
 
@@ -341,7 +360,12 @@ async fn list(config_path: &std::path::Path, kind: Option<String>) -> anyhow::Re
     entries.sort_by_key(|e| e.key.to_string());
     println!(
         "{}",
-        render_memories(&cfg.context_id, entries.iter().collect::<Vec<_>>(), false)
+        render_memories(
+            &cfg.context_id,
+            entries.iter().collect::<Vec<_>>(),
+            false,
+            None
+        )
     );
     Ok(())
 }
@@ -361,6 +385,10 @@ async fn doctor(config_path: &std::path::Path) -> anyhow::Result<()> {
     println!("vta         {}", cfg.identity.vta_did());
     println!("context     {}", cfg.context_id);
     println!("identity    {}", cfg.identity.label());
+    // The same check the server and hook make, so `doctor` explains a refusal
+    // rather than connecting where they would not.
+    cfg.identity
+        .ensure_permitted(operator_login_allowed_by_env())?;
 
     let client = cfg.to_agent_connect().connect().await?;
     println!("transport   {:?}", client.trust_task_transport());
@@ -402,7 +430,17 @@ fn parse_kind(raw: Option<&str>) -> anyhow::Result<Option<MemoryType>> {
 }
 
 /// Render memories as markdown for a hook or a terminal.
-fn render_memories(context_id: &str, entries: Vec<&record::Entry>, full: bool) -> String {
+///
+/// With `max_bytes`, the whole returned string (preamble and delimiters
+/// included) stays within it. Memories that do not fit are left out, the one
+/// that crosses the limit is cut short, and a marker saying so goes inside the
+/// fence, so a reader knows the listing is incomplete.
+fn render_memories(
+    context_id: &str,
+    entries: Vec<&record::Entry>,
+    full: bool,
+    max_bytes: Option<usize>,
+) -> String {
     if entries.is_empty() {
         return format!("No memories stored in trust context `{context_id}`.");
     }
@@ -411,28 +449,85 @@ fn render_memories(context_id: &str, entries: Vec<&record::Entry>, full: bool) -
     // machine did not author, so everything below the preamble is fenced with
     // a nonce the content cannot predict. See `fence`.
     let fence = Fence::new(Provenance::Context);
-    let mut out = format!(
-        "# Stored memories ({} in trust context `{context_id}`)\n",
-        entries.len()
+    let total = entries.len();
+
+    // Each piece is sanitised as it is added, so its length is final when it
+    // is counted: `wrap` sanitises again, but finds nothing left to change.
+    // Pieces other than the first start with a newline, which no delimiter
+    // shape contains, so joining them cannot create one either.
+    let budget =
+        max_bytes.map(|max| max.saturating_sub(fence.wrap("").len() + TRUNCATION_MARKER_RESERVE));
+    let mut out = String::new();
+    let push = |out: &mut String, piece: &str| -> bool {
+        let piece = Fence::sanitize(piece);
+        match budget {
+            Some(budget) if out.len() + piece.len() > budget => {
+                let room = budget.saturating_sub(out.len());
+                out.push_str(truncate_at_char_boundary(&piece, room));
+                false
+            }
+            _ => {
+                out.push_str(&piece);
+                true
+            }
+        }
+    };
+
+    let mut shown = 0;
+    let mut complete = push(
+        &mut out,
+        &format!("# Stored memories ({total} in trust context `{context_id}`)\n"),
     );
-    for kind in MemoryType::ALL {
+    'render: for kind in MemoryType::ALL {
+        if !complete {
+            break;
+        }
         let of_kind: Vec<&&record::Entry> = entries.iter().filter(|e| e.key.kind == kind).collect();
         if of_kind.is_empty() {
             continue;
         }
-        out.push_str(&format!("\n## {kind}\n"));
+        if !push(&mut out, &format!("\n## {kind}\n")) {
+            complete = false;
+            break;
+        }
         for e in of_kind {
-            out.push_str(&format!(
+            let mut item = format!(
                 "\n- **{}** (`{}`) — {}",
                 e.record.name, e.key, e.record.description
-            ));
+            );
             if full && !e.record.body.is_empty() {
-                out.push_str(&format!("\n\n  {}", e.record.body.replace('\n', "\n  ")));
+                item.push_str(&format!("\n\n  {}", e.record.body.replace('\n', "\n  ")));
             }
+            if !push(&mut out, &item) {
+                complete = false;
+                break 'render;
+            }
+            shown += 1;
         }
-        out.push('\n');
+        complete = push(&mut out, "\n");
+    }
+
+    if !complete {
+        out.push_str(&format!(
+            "\n\n[Truncated: {shown} of {total} memories shown in full. Session-start memory \
+             is capped at {} KiB; use memory_recall or memory_get for the rest.]\n",
+            max_bytes.unwrap_or_default() / 1024
+        ));
     }
     fence.wrap(&out)
+}
+
+/// The longest prefix of `s` that is at most `max` bytes and ends on a char
+/// boundary.
+fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Phase-1 output. The grant command is the deliverable — it is meant to be
@@ -465,6 +560,17 @@ fn print_setup_outcome(o: &setup::SetupOutcome) {
         println!("  agent DID   {did}");
     }
     println!("  memories    {} already stored", o.memories_found);
+    if o.operator_login {
+        eprintln!(
+            "\nWARNING: this config reuses your own `pnm` operator login, so the memory \
+             service can reach everything that login can.\n\
+             The MCP server, the SessionStart hook and the recall/list/forget/doctor commands \
+             refuse it unless {ALLOW_OPERATOR_LOGIN_ENV}=1 is set in the environment they run \
+             in (for the plugin, the environment Claude Code is started from).\n\
+             A dedicated agent scoped to one context needs no opt-in: run `setup --force` \
+             without --use-session."
+        );
+    }
     println!("\nEnable it in Claude Code (two steps — `install` alone cannot find a");
     println!("plugin whose marketplace has not been added):");
     println!("  claude plugin marketplace add OpenVTC/vta-agent-memory");
@@ -491,7 +597,7 @@ mod tests {
     fn an_empty_context_renders_as_a_sentence_not_an_empty_heading() {
         // This string is pasted straight into a session's context by the hook;
         // a bare heading with nothing under it reads like a failure.
-        let out = render_memories("proj", vec![], false);
+        let out = render_memories("proj", vec![], false, None);
         assert!(out.contains("No memories stored"));
         assert!(!out.contains('#'));
     }
@@ -500,7 +606,7 @@ mod tests {
     fn memories_are_grouped_by_type_in_a_fixed_order() {
         let a = entry(MemoryType::Project, "P", "a project", "body");
         let b = entry(MemoryType::User, "U", "a user fact", "body");
-        let out = render_memories("proj", vec![&a, &b], false);
+        let out = render_memories("proj", vec![&a, &b], false, None);
         let user_at = out.find("## user").expect("user section");
         let project_at = out.find("## project").expect("project section");
         assert!(
@@ -512,10 +618,90 @@ mod tests {
     #[test]
     fn summaries_omit_bodies_unless_asked() {
         let e = entry(MemoryType::User, "U", "one line", "the long body");
-        let brief = render_memories("proj", vec![&e], false);
+        let brief = render_memories("proj", vec![&e], false, None);
         assert!(brief.contains("one line"));
         assert!(!brief.contains("the long body"), "bodies cost context");
-        assert!(render_memories("proj", vec![&e], true).contains("the long body"));
+        assert!(render_memories("proj", vec![&e], true, None).contains("the long body"));
+    }
+
+    /// The opening and closing delimiters of a render, which must each appear
+    /// exactly once, with the opening one first.
+    fn fence_bounds(out: &str) -> (usize, usize) {
+        assert_eq!(out.matches("<<<UNTRUSTED-MEMORY:").count(), 1, "{out}");
+        assert_eq!(out.matches("<<</UNTRUSTED-MEMORY:").count(), 1, "{out}");
+        let open = out.find("<<<UNTRUSTED-MEMORY:").unwrap();
+        let close = out.find("<<</UNTRUSTED-MEMORY:").unwrap();
+        assert!(open < close);
+        (open, close)
+    }
+
+    #[test]
+    fn hook_output_is_capped_with_the_marker_inside_the_fence() {
+        let body = "b".repeat(record::MAX_BODY_BYTES);
+        let entries: Vec<Entry> = (0..100)
+            .map(|i| {
+                entry(
+                    MemoryType::Project,
+                    &format!("memory {i}"),
+                    "sixteen kibibytes",
+                    &body,
+                )
+            })
+            .collect();
+
+        let out = render_memories(
+            "proj",
+            entries.iter().collect(),
+            true,
+            Some(MAX_HOOK_CONTEXT_BYTES),
+        );
+        assert!(
+            out.len() <= MAX_HOOK_CONTEXT_BYTES,
+            "{} bytes is over the cap",
+            out.len()
+        );
+        let (open, close) = fence_bounds(&out);
+        let marker = out.find("[Truncated: 1 of 100 memories").expect("a marker");
+        assert!(
+            open < marker && marker < close,
+            "the marker is inside the fence"
+        );
+    }
+
+    #[test]
+    fn a_render_within_the_cap_is_unchanged_by_it() {
+        let a = entry(MemoryType::User, "U", "one line", "short body");
+        let b = entry(MemoryType::Project, "P", "another", "short body");
+        let capped = render_memories("proj", vec![&a, &b], true, Some(MAX_HOOK_CONTEXT_BYTES));
+        assert!(!capped.contains("[Truncated"));
+        fence_bounds(&capped);
+        // Only the nonce differs between two renders.
+        let uncapped = render_memories("proj", vec![&a, &b], true, None);
+        assert_eq!(capped.len(), uncapped.len());
+    }
+
+    /// A body stored before the save limits existed can be larger than the cap
+    /// on its own. It is cut, not dropped, and multi-byte text is cut on a char
+    /// boundary.
+    #[test]
+    fn a_single_oversized_body_is_cut_on_a_char_boundary() {
+        let e = entry(MemoryType::Reference, "Legacy", "old", &"é".repeat(60_000));
+        let out = render_memories("proj", vec![&e], true, Some(MAX_HOOK_CONTEXT_BYTES));
+        assert!(out.len() <= MAX_HOOK_CONTEXT_BYTES, "{}", out.len());
+        assert!(out.contains("**Legacy**"), "the memory is still named");
+        assert!(out.contains("[Truncated: 0 of 1 memories shown in full"));
+        fence_bounds(&out);
+    }
+
+    #[test]
+    fn the_cap_does_not_apply_to_a_person_at_a_terminal() {
+        let body = "b".repeat(record::MAX_BODY_BYTES);
+        let entries: Vec<Entry> = (0..4)
+            .map(|i| entry(MemoryType::Project, &format!("m {i}"), "d", &body))
+            .collect();
+        let out = render_memories("proj", entries.iter().collect(), true, None);
+        assert!(out.len() > MAX_HOOK_CONTEXT_BYTES);
+        assert!(!out.contains("[Truncated"));
     }
 
     #[test]

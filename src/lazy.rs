@@ -36,6 +36,11 @@ pub struct LazyStore {
     config_path: std::path::PathBuf,
     config: OnceCell<Config>,
     store: OnceCell<Store>,
+    /// Whether an operator-login config may be used. Read from the environment
+    /// once, at construction. See [`Identity::ensure_permitted`].
+    ///
+    /// [`Identity::ensure_permitted`]: crate::config::Identity::ensure_permitted
+    allow_operator_login: bool,
 }
 
 impl LazyStore {
@@ -46,7 +51,36 @@ impl LazyStore {
             config_path: config_path.into(),
             config: OnceCell::new(),
             store: OnceCell::new(),
+            allow_operator_login: crate::config::operator_login_allowed_by_env(),
         }
+    }
+
+    /// A store that is already connected. Lets the MCP tools be exercised
+    /// against the SDK's in-process loopback transport.
+    #[cfg(test)]
+    pub(crate) fn connected(store: Store) -> Self {
+        Self {
+            config_path: std::path::PathBuf::new(),
+            config: OnceCell::new(),
+            store: OnceCell::new_with(Some(store)),
+            allow_operator_login: false,
+        }
+    }
+
+    /// Override the environment's operator-login opt-in, so tests do not
+    /// depend on (or change) the process environment.
+    #[cfg(test)]
+    fn allowing_operator_login(mut self, allow: bool) -> Self {
+        self.allow_operator_login = allow;
+        self
+    }
+
+    /// The loaded config, provided its identity is one this process may
+    /// connect as. Checked before any connection is attempted.
+    async fn usable_config(&self) -> anyhow::Result<&Config> {
+        let cfg = self.config().await?;
+        cfg.identity.ensure_permitted(self.allow_operator_login)?;
+        Ok(cfg)
     }
 
     /// The loaded config. Cheap — a local file read, no network.
@@ -67,7 +101,7 @@ impl LazyStore {
     pub async fn store(&self) -> anyhow::Result<&Store> {
         self.store
             .get_or_try_init(|| async {
-                let cfg = self.config().await?.clone();
+                let cfg = self.usable_config().await?.clone();
                 let context_id = cfg.context_id.clone();
 
                 // The connect future is **not `Send`**: the session rung goes
@@ -175,5 +209,48 @@ mod tests {
         assert_eq!(cfg.context_id, "proj");
         assert_eq!(cfg.identity.vta_did(), "did:key:zV");
         assert!(!lazy.is_connected(), "reading config must not connect");
+    }
+
+    fn operator_login_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"contextId":"proj","identity":{"serviceName":"pnm-cli",
+                "sessionKey":"vta:mine","sessionsDir":"/nonexistent","vtaDid":"did:key:zV",
+                "operatorLogin":true}}"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn an_operator_login_is_refused_before_connecting_without_the_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = LazyStore::new(operator_login_config(&dir)).allowing_operator_login(false);
+
+        let Err(err) = lazy.store().await else {
+            panic!("an operator login must not produce a store without the opt-in");
+        };
+        assert!(
+            format!("{err:#}").contains(crate::config::ALLOW_OPERATOR_LOGIN_ENV),
+            "the refusal must name the opt-in, since it reaches a person via the model: {err:#}"
+        );
+        assert!(!lazy.is_connected());
+
+        // Diagnostics still work: `memory_context` reads the config directly.
+        assert!(lazy.config().await.unwrap().identity.operator_login);
+    }
+
+    #[tokio::test]
+    async fn with_the_opt_in_an_operator_login_goes_on_to_connect() {
+        // Stops short of connecting, which would need a real session: the
+        // config `store()` would connect with is handed over.
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = LazyStore::new(operator_login_config(&dir)).allowing_operator_login(true);
+        let cfg = lazy
+            .usable_config()
+            .await
+            .expect("permitted with the opt-in");
+        assert!(cfg.identity.operator_login);
     }
 }
