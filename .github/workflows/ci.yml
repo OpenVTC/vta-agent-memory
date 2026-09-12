@@ -10,6 +10,18 @@
 # That is precisely the failure a semantic check catches and a textual merge
 # cannot, so it runs on `merge_group` too: a PR that was green on its own branch
 # can still break `main` when combined with another.
+#
+# Supply chain. The plugin is installed by cloning `main`, and its binary runs
+# at every Claude Code session start, so whatever can write to `main` can run
+# code on every installing machine. Two consequences for this file:
+#
+# - Every third-party action is pinned to a full commit SHA, with the release it
+#   corresponds to in a trailing comment. A tag or branch can be moved to new
+#   code after review; a commit SHA cannot. Dependabot
+#   (`.github/dependabot.yml`) proposes the bumps, and the `workflow hygiene`
+#   job below fails on any `uses:` that is not pinned.
+# - The default token is read-only, and checkouts do not keep it in
+#   `.git/config`. Nothing here pushes, comments or publishes.
 name: CI
 
 on:
@@ -17,6 +29,9 @@ on:
     branches: [main]
   pull_request:
   merge_group:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,6 +43,10 @@ env:
   # service has to be trustworthy about what it does and does not know; a
   # tolerated warning is a small lie about that.
   RUSTFLAGS: -D warnings
+  # The toolchain CI builds with. Kept equal to `rust-version` in Cargo.toml,
+  # so the version the README promises is the one that is actually tested; the
+  # install step fails if the two drift apart.
+  RUST_TOOLCHAIN: 1.95.0
 
 jobs:
   test:
@@ -38,17 +57,28 @@ jobs:
     # Linux-only matrix would have been green through both.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
+
+      # rustup ships on the hosted runners, so no third-party action is needed
+      # to pick a toolchain — and a pinned version is explicit here rather than
+      # implied by an action's branch name.
+      - name: Install Rust
+        run: |
+          grep -qx "rust-version = \"${RUST_TOOLCHAIN}\"" Cargo.toml \
+            || { echo "::error file=Cargo.toml::rust-version does not match RUST_TOOLCHAIN (${RUST_TOOLCHAIN}) in ci.yml"; exit 1; }
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt,clippy
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc --version
 
       # The `[patch.crates-io]` git dependency on the VTI workspace is a large
       # fetch and a long build; caching it is the difference between a usable
-      # CI and one people learn to ignore.
-      - uses: Swatinem/rust-cache@v2
+      # CI and one people learn to ignore. Only `main` writes the cache, so a
+      # pull request can read it but cannot seed what later runs restore.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -59,11 +89,62 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+  workflows:
+    name: workflow hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # A mutable `uses:` ref added later would quietly undo the pinning above,
+      # and nothing else would notice. Local actions (`./…`) are part of this
+      # repo and exempt; a `docker://` image must be pinned by digest.
+      - name: Check every action is pinned to a commit SHA
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          uses = re.compile(r"""^\s*(?:-\s*)?uses:\s*["']?([^"'\s#]+)""")
+          sha = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
+          digest = re.compile(r"^docker://[^@\s]+@sha256:[0-9a-f]{64}$")
+          bad = False
+          files = sorted(pathlib.Path(".github").rglob("*.yml")) + sorted(pathlib.Path(".github").rglob("*.yaml"))
+          for f in files:
+              for n, line in enumerate(f.read_text().splitlines(), 1):
+                  m = uses.match(line)
+                  if not m:
+                      continue
+                  ref = m.group(1)
+                  if ref.startswith("./"):
+                      continue
+                  ok = digest.match(ref) if ref.startswith("docker://") else sha.match(ref)
+                  if not ok:
+                      print(f"::error file={f},line={n}::`{ref}` is not pinned to a full commit SHA")
+                      bad = True
+                  else:
+                      print(f"ok {f}:{n} {ref}")
+          sys.exit(1 if bad else 0)
+          PY
+
+      # Without a top-level block a workflow inherits the repository default,
+      # which can be a write token.
+      - name: Check every workflow declares its token permissions
+        run: |
+          fail=0
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -e "$f" ] || continue
+            grep -q '^permissions:' "$f" \
+              || { echo "::error file=$f::no top-level permissions: block"; fail=1; }
+          done
+          exit $fail
+
   plugin:
     name: plugin manifest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       # The manifests are what a person meets before any Rust runs. A malformed
       # `plugin.json` or `.mcp.json` breaks the plugin without breaking the
