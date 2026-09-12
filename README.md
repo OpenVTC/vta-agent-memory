@@ -168,7 +168,11 @@ pnm acl delete --did <the agent DID setup printed>
 
 `--use-session` skips the minting and reuses your own login instead. It stores no
 key, but the memory service then inherits your whole reach, and revoking it means
-revoking your login.
+revoking your login. For that reason the MCP server, the `SessionStart` hook and
+the `recall`/`list`/`forget`/`doctor` commands **refuse a config written this
+way** unless `VTA_AGENT_MEMORY_ALLOW_OPERATOR_LOGIN=1` is set in the environment
+they run in (for the plugin, the environment Claude Code is started from). The
+default dedicated agent needs no such setting.
 
 Reach for it when the VTA advertises no DIDComm mediator — a REST-only VTA — the
 one case where a `did:key` agent has no way in. If that VTA has a mediator that
@@ -214,6 +218,16 @@ person accumulates. If that stops being true, the fix is upstream — a
 `vta/memory/query` with a prefix and a cursor — and it starts with a spec PR in
 `trustoverip/dtgwg-trust-tasks-tf`, because the VTA's dispatcher refuses URIs the
 published registry has no schema for.
+
+**What a save can hold, and how much of it a session gets.** A memory is a note,
+not a document: `memory_save` refuses a name over 120 characters, a description
+over 300, a body over 16 KiB, more than 32 links, or a link over 120 characters.
+`memory_list` returns one page — 50 by default, at most 200 — with `total` and a
+`nextOffset` for the next one. The `SessionStart` hook caps what it injects at
+32 KiB and says inside the fence when it had to truncate, because that text lands
+in the context before the user has typed anything. The limits are checked where a
+record comes in, never on decode, so a memory stored before they existed — or by
+another tool — stays readable and forgettable.
 
 **Memory is not application state.** "Forget everything" has to stay a safe thing
 for a user to ask, which it stops being the moment account state lives here. The

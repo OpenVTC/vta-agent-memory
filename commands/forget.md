@@ -13,4 +13,5 @@ If the argument is already a key (`type/name`), confirm what it is with
 guess when more than one matches.
 
 If they have asked to forget everything, run `memory_list` first, show them what
-is there, and confirm before deleting anything.
+is there, and confirm before deleting anything. `memory_list` is paged: keep
+calling it with `nextOffset` until there is none, so nothing is missed.

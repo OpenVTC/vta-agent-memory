@@ -58,6 +58,9 @@ pub struct SetupOutcome {
     pub vta_did: String,
     pub context_id: String,
     pub identity_label: String,
+    /// The config reuses the operator's own login, which the server and hook
+    /// refuse without an explicit opt-in — so setup has to say so.
+    pub operator_login: bool,
     pub agent_did: Option<String>,
     pub memories_found: usize,
 }
@@ -169,6 +172,7 @@ async fn setup_body(
         vta_did: target.vta_did.clone(),
         context_id,
         identity_label: cfg.identity.label().to_string(),
+        operator_login: cfg.identity.operator_login,
         agent_did,
         memories_found,
     })

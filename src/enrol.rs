@@ -298,6 +298,7 @@ pub async fn connect(args: ConnectArgs) -> anyhow::Result<SetupOutcome> {
         vta_did: pending.vta_did,
         context_id: pending.context_id,
         identity_label: cfg.identity.label().to_string(),
+        operator_login: cfg.identity.operator_login,
         agent_did: rotated_did,
         memories_found,
     })

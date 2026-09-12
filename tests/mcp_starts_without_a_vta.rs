@@ -103,6 +103,38 @@ fn every_memory_tool_is_offered_with_no_vta_reachable() {
 }
 
 #[test]
+fn tool_annotations_reach_the_client() {
+    // Clients decide what needs the user's confirmation from these hints, so
+    // they only help if they are on the wire, spelled the way the spec spells
+    // them.
+    let responses = talk_to_server(&[
+        INITIALIZE,
+        INITIALIZED,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    ]);
+    let listed = by_id(&responses, 2).expect("the server must answer tools/list");
+    let tools = listed["result"]["tools"].as_array().expect("tools array");
+    let annotations = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .map(|t| t["annotations"].clone())
+            .unwrap_or_else(|| panic!("no tool {name}"))
+    };
+
+    assert_eq!(annotations("memory_forget")["destructiveHint"], true);
+    assert_eq!(annotations("memory_forget")["readOnlyHint"], false);
+    for name in [
+        "memory_recall",
+        "memory_get",
+        "memory_list",
+        "memory_context",
+    ] {
+        assert_eq!(annotations(name)["readOnlyHint"], true, "{name}");
+    }
+}
+
+#[test]
 fn a_tool_call_returns_an_error_that_names_the_fix() {
     // The error reaches a person through the model, so it has to be worth
     // relaying — "run setup", not "os error 2".

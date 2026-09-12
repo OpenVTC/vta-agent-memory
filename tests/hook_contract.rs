@@ -70,3 +70,50 @@ fn hook_output_is_json_only_on_stdout() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// A config written by `setup --use-session` authenticates as the operator's
+/// own login. The hook runs unattended in every session, so it refuses that
+/// unless the environment opts in: silently for the hook, which must still not
+/// fail the session, and with the opt-in named for a person.
+#[test]
+fn an_operator_login_config_is_refused_without_the_opt_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("config.json");
+    let body = serde_json::json!({
+        "version": 1,
+        "contextId": "proj",
+        "identity": {
+            "serviceName": "pnm-cli",
+            "sessionKey": "vta:mine",
+            "sessionsDir": dir.path(),
+            "vtaDid": "did:key:zV",
+            "operatorLogin": true,
+        },
+    });
+    std::fs::write(&config, body.to_string()).expect("writing the config");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_vta-agent-memory"))
+            .args(args)
+            .env("VTA_AGENT_MEMORY_CONFIG", &config)
+            .env_remove("VTA_AGENT_MEMORY_ALLOW_OPERATOR_LOGIN")
+            .output()
+            .expect("running the binary")
+    };
+
+    let hook = run(&["recall", "--format", "json"]);
+    assert!(hook.status.success(), "the hook must still exit 0");
+    assert!(
+        hook.stdout.is_empty(),
+        "and inject nothing: {}",
+        String::from_utf8_lossy(&hook.stdout)
+    );
+
+    let person = run(&["recall"]);
+    assert!(!person.status.success(), "a person is told it was refused");
+    let stderr = String::from_utf8_lossy(&person.stderr);
+    assert!(
+        stderr.contains("VTA_AGENT_MEMORY_ALLOW_OPERATOR_LOGIN"),
+        "and how to opt in: {stderr}"
+    );
+}

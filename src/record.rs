@@ -37,6 +37,24 @@ use std::fmt;
 /// cannot absorb; new optional fields do not need it.
 pub const RECORD_VERSION: u8 = 1;
 
+// Limits on a memory a caller saves. A memory is a note, not a document, and
+// whatever one save stores can be pasted into every later session's context,
+// so these bound that. They are enforced where a record comes in
+// (`memory_save`), not on decode: an entry stored before the limits existed, or
+// by another tool, stays readable and forgettable.
+
+/// Longest `name`, in characters.
+pub const MAX_NAME_CHARS: usize = 120;
+/// Longest `description`, in characters. Recall returns it, so it should be one
+/// line, not a paragraph.
+pub const MAX_DESCRIPTION_CHARS: usize = 300;
+/// Largest `body`, in bytes (16 KiB).
+pub const MAX_BODY_BYTES: usize = 16 * 1024;
+/// Most `links` one memory can carry.
+pub const MAX_LINKS: usize = 32;
+/// Longest single link, in characters.
+pub const MAX_LINK_CHARS: usize = 120;
+
 /// What kind of thing a memory is. Deliberately the same four-way split Claude
 /// Code's own file-based memory uses, so a project moving onto the VTA keeps
 /// its taxonomy (and its habits about what is worth saving).
@@ -275,21 +293,71 @@ impl MemoryRecord {
         serde_json::to_string(self)
     }
 
-    /// The compact form recall returns: enough to decide, not enough to cost.
-    /// The compact form `memory_recall` returns.
+    /// Check the caller-supplied fields against the `MAX_*` limits, naming the
+    /// first limit exceeded.
     ///
-    /// Author-supplied strings are passed through [`Fence::sanitize`]: a JSON
-    /// field is still text once a model reads it, so a `description` carrying
-    /// a delimiter shape could otherwise appear to close the fence the caller
-    /// wrapped this payload in. Sanitizing at the projection means every
-    /// consumer of `summary`/`full` inherits it. (F8.)
+    /// The one-line fields are measured in characters, so a name in a
+    /// non-Latin script gets the same allowance. The body is measured in bytes,
+    /// because what that limit bounds is how much text can reach a context
+    /// window.
+    pub fn check_limits(&self) -> Result<(), String> {
+        let name = self.name.chars().count();
+        if name > MAX_NAME_CHARS {
+            return Err(format!(
+                "`name` is {name} characters; the limit is {MAX_NAME_CHARS}"
+            ));
+        }
+        let description = self.description.chars().count();
+        if description > MAX_DESCRIPTION_CHARS {
+            return Err(format!(
+                "`description` is {description} characters; the limit is \
+                 {MAX_DESCRIPTION_CHARS} — it should be one line"
+            ));
+        }
+        if self.body.len() > MAX_BODY_BYTES {
+            return Err(format!(
+                "`body` is {} bytes; the limit is {MAX_BODY_BYTES} (16 KiB) — keep the \
+                 essentials, or save a pointer to where the rest lives",
+                self.body.len()
+            ));
+        }
+        if self.links.len() > MAX_LINKS {
+            return Err(format!(
+                "{} `links`; the limit is {MAX_LINKS}",
+                self.links.len()
+            ));
+        }
+        if let Some((i, link)) = self
+            .links
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.chars().count() > MAX_LINK_CHARS)
+        {
+            return Err(format!(
+                "link {} is {} characters; the limit for each link is {MAX_LINK_CHARS}",
+                i + 1,
+                link.chars().count()
+            ));
+        }
+        Ok(())
+    }
+
+    /// The compact form `memory_recall` returns: enough to decide, not enough
+    /// to cost.
+    ///
+    /// Author-supplied strings (name, description, links) are passed through
+    /// [`Fence::sanitize`]: a JSON field is still text once a model reads it,
+    /// so a field carrying a delimiter shape could otherwise appear to close
+    /// the fence the caller wrapped this payload in. Sanitizing at the
+    /// projection means every consumer of `summary`/`full` inherits it. (F8.)
     pub fn summary(&self, key: &MemoryKey) -> serde_json::Value {
+        let links: Vec<String> = self.links.iter().map(|l| Fence::sanitize(l)).collect();
         serde_json::json!({
             "key": key.to_string(),
             "name": Fence::sanitize(&self.name),
             "type": self.kind.as_str(),
             "description": Fence::sanitize(&self.description),
-            "links": self.links,
+            "links": links,
             "updatedAt": self.updated_at,
             // Stated on every projection so a reader never has to infer it.
             "trust": "untrusted-data",

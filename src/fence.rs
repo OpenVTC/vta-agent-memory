@@ -115,6 +115,13 @@ impl Fence {
         format!("<<</{SENTINEL}:{}>>>", self.nonce)
     }
 
+    /// The statement placed above the opening delimiter, saying that what
+    /// follows is data. For callers that emit the parts separately rather than
+    /// through [`wrap`](Self::wrap).
+    pub fn preamble(&self) -> &'static str {
+        self.provenance.preamble()
+    }
+
     /// Neutralise any text that resembles one of this module's delimiters, so
     /// stored content cannot appear to open or close a fence — its own or
     /// anyone else's. A zero-width-free, visible substitution: the reader can

@@ -101,6 +101,12 @@ stored.
 Link related memories by name in the `links` field. A link to a memory that does
 not exist yet is fine — it marks something worth writing later.
 
+A memory is a note, not a document, and what one save stores can be pasted into
+every later session. So a save is bounded: the name is at most 120 characters,
+the description 300, the body 16 KiB, and there can be at most 32 links of 120
+characters each. A save over any of those is refused and says which limit it hit.
+Keep the essentials in the body and save a pointer to where the rest lives.
+
 ## What not to save
 
 - **Anything the repository already records.** Code structure, past fixes, git
@@ -139,8 +145,10 @@ supersedes the old one. If a memory turns out to be wrong, forgetting it is
 right — a wrong memory is worse than a missing one.
 
 If the user asks you to forget *everything*, confirm the scope first, list what
-is there with `memory_list`, and only then delete. It is a small number of calls
-and it is not reversible.
+is there with `memory_list`, and only then delete. `memory_list` returns one page
+and a `total`: keep calling it with the previous result's `nextOffset` until there
+is none, or you will delete only the first page of what you showed them. It is a
+small number of calls and it is not reversible.
 
 ## Setup problems
 
