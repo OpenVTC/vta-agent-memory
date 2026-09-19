@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -375,14 +375,20 @@ impl MemoryMcp {
 
 #[tool_handler]
 impl ServerHandler for MemoryMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // `Implementation` / `InitializeResult` are `#[non_exhaustive]`, so
         // build them via constructors plus field assignment.
+        //
+        // `ServerConfig` is this whole value — protocol version, capabilities
+        // and identity; `server_info` below is only the `Implementation`
+        // identity, which is the collision the old `ServerInfo` alias was
+        // renamed to end (rmcp#1082): `server_info.server_info` read as a
+        // typo and was not one.
         let mut server_info = Implementation::from_build_env();
         server_info.name = "vta-agent-memory".to_string();
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
 
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_instructions(
                 "Durable memory for this user, stored in their own Verifiable Trust Agent \
