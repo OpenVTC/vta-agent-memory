@@ -3,14 +3,16 @@
 //!
 //! The SDK's `test-loopback` transport answers the Trust-Task surface in the
 //! same process, ahead of any real transport. So these tests run the *real*
-//! `VtaClient::memory_{put,list,delete}` bodies — the same payload-building code
-//! that ships — and hand what they emit to [`FakeMemoryKeyspace`], which
-//! implements the storage semantics the VTA's own `operations::memory` does:
+//! `VtaClient` memory method bodies — the same payload-building code that
+//! ships — and hand what they emit to [`FakeMemoryKeyspace`], which implements
+//! the storage semantics the VTA's own `operations::memory` does at
+//! `vta/memory/*/0.2` and `get/0.1`:
 //!
-//! - `put` upserts on `(contextId, key)`.
-//! - `list` returns every entry in the context, ascending key order, and never
-//!   another context's entries.
-//! - `delete` of an absent key is `not found`.
+//! - `put` upserts on `(contextId, key)` and takes the context's next version.
+//! - `list` returns the context's live items in ascending key order, narrowed
+//!   by `prefix`, and never another context's.
+//! - `get` answers each key in `items` or `missing`.
+//! - `delete` leaves nothing live and answers `existed`.
 //!
 //! What this cannot cover is framing — TSP sealing, DIDComm authcrypt, mediator
 //! routing all sit below the loopback point. It covers the layer where the
@@ -28,28 +30,34 @@ use vta_sdk::error::VtaError;
 use vta_agent_memory::record::{MemoryKey, MemoryRecord, MemoryType};
 use vta_agent_memory::store::Store;
 
-/// The three memory Trust Tasks, backed by a `BTreeMap` keyed the way the VTA
-/// keys its own store (`mem:<contextId>:<key>`), so ordering and the
-/// context-isolation property are the real ones rather than assumed.
+/// The memory Trust Tasks, backed by a `BTreeMap` keyed by
+/// `(contextId, key)`, so ordering and the context-isolation property are the
+/// real ones rather than assumed.
 #[derive(Default)]
 struct FakeMemoryKeyspace {
-    entries: Mutex<BTreeMap<String, (String, String)>>,
+    /// `(contextId, key)` → `(value, version)`.
+    entries: Mutex<BTreeMap<(String, String), (String, u64)>>,
+    counter: Mutex<u64>,
     /// Every `(type_uri, payload)` dispatched, so a test can assert on the wire
     /// shape as well as the outcome.
     seen: Mutex<Vec<(String, Value)>>,
 }
 
 impl FakeMemoryKeyspace {
-    fn storage_key(context_id: &str, key: &str) -> String {
-        format!("mem:{context_id}:{key}")
-    }
-
     fn recorded(&self) -> Vec<(String, Value)> {
         self.seen.lock().unwrap().clone()
     }
 
     fn len(&self) -> usize {
         self.entries.lock().unwrap().len()
+    }
+
+    fn record(context_id: &str, key: &str, value: &str, version: u64) -> Value {
+        json!({
+            "contextId": context_id, "key": key, "value": value, "version": version,
+            "valueBytes": value.len(), "deleted": false,
+            "updatedAt": "2026-11-09T00:00:00Z",
+        })
     }
 }
 
@@ -70,40 +78,59 @@ impl LoopbackSink for FakeMemoryKeyspace {
         let context_id = field(payload, "contextId")?;
 
         match type_uri {
-            u if u.ends_with("/vta/memory/put/0.1") => {
+            u if u.ends_with("/vta/memory/put/0.2") => {
                 let key = field(payload, "key")?;
                 let value = field(payload, "value")?;
-                self.entries.lock().unwrap().insert(
-                    Self::storage_key(context_id, key),
-                    (key.to_string(), value.to_string()),
-                );
-                Ok(json!({ "key": key }))
+                let mut counter = self.counter.lock().unwrap();
+                *counter += 1;
+                let created = self
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .insert(
+                        (context_id.to_string(), key.to_string()),
+                        (value.to_string(), *counter),
+                    )
+                    .is_none();
+                Ok(json!({
+                    "contextId": context_id, "key": key, "version": *counter,
+                    "wasCreated": created, "updatedAt": "2026-11-09T00:00:00Z",
+                    "valueBytes": value.len(),
+                }))
             }
-            u if u.ends_with("/vta/memory/list/0.1") => {
-                let prefix = format!("mem:{context_id}:");
+            u if u.ends_with("/vta/memory/list/0.2") => {
+                let prefix = payload.get("prefix").and_then(Value::as_str).unwrap_or("");
                 let items: Vec<Value> = self
                     .entries
                     .lock()
                     .unwrap()
                     .iter()
-                    .filter(|(sk, _)| sk.starts_with(&prefix))
-                    .map(|(_, (k, v))| json!({ "key": k, "value": v }))
+                    .filter(|((c, k), _)| c == context_id && k.starts_with(prefix))
+                    .map(|((c, k), (v, ver))| Self::record(c, k, v, *ver))
                     .collect();
-                Ok(json!({ "items": items }))
+                Ok(json!({ "items": items, "highWatermark": *self.counter.lock().unwrap() }))
             }
-            u if u.ends_with("/vta/memory/delete/0.1") => {
+            u if u.ends_with("/vta/memory/get/0.1") => {
+                let entries = self.entries.lock().unwrap();
+                let (mut items, mut missing) = (Vec::new(), Vec::new());
+                for k in payload["keys"].as_array().into_iter().flatten() {
+                    let k = k.as_str().unwrap_or_default();
+                    match entries.get(&(context_id.to_string(), k.to_string())) {
+                        Some((v, ver)) => items.push(Self::record(context_id, k, v, *ver)),
+                        None => missing.push(json!(k)),
+                    }
+                }
+                Ok(json!({ "items": items, "missing": missing }))
+            }
+            u if u.ends_with("/vta/memory/delete/0.2") => {
                 let key = field(payload, "key")?;
-                let removed = self
+                let existed = self
                     .entries
                     .lock()
                     .unwrap()
-                    .remove(&Self::storage_key(context_id, key));
-                match removed {
-                    Some(_) => Ok(json!({ "key": key })),
-                    None => Err(VtaError::NotFound(format!(
-                        "memory entry `{key}` not found in context `{context_id}`"
-                    ))),
-                }
+                    .remove(&(context_id.to_string(), key.to_string()))
+                    .is_some();
+                Ok(json!({ "contextId": context_id, "key": key, "existed": existed }))
             }
             other => Err(VtaError::Validation(format!(
                 "the memory store must not dispatch `{other}`"
@@ -315,8 +342,8 @@ async fn an_entry_written_by_another_tool_is_skipped_not_fatal() {
     // listable. Erroring here would make one stray entry break every recall.
     let vta = Arc::new(FakeMemoryKeyspace::default());
     vta.entries.lock().unwrap().insert(
-        FakeMemoryKeyspace::storage_key("proj", "some-other-tools-key"),
-        ("some-other-tools-key".into(), "opaque".into()),
+        ("proj".into(), "some-other-tools-key".into()),
+        ("opaque".into(), 1),
     );
     let store = Store::new(VtaClient::loopback(vta.clone()), "proj");
 
@@ -345,7 +372,7 @@ async fn the_payloads_on_the_wire_are_camel_case_and_context_scoped() {
 
     let seen = vta.recorded();
     let (put_uri, put) = &seen[0];
-    assert!(put_uri.ends_with("/vta/memory/put/0.1"), "{put_uri}");
+    assert!(put_uri.ends_with("/vta/memory/put/0.2"), "{put_uri}");
     assert_eq!(put.get("contextId").unwrap(), "proj");
     assert_eq!(put.get("key").unwrap(), "user/name");
     assert!(
@@ -361,7 +388,7 @@ async fn the_payloads_on_the_wire_are_camel_case_and_context_scoped() {
     assert!(!stored.updated_at.is_empty(), "every write is stamped");
 
     let (del_uri, del) = &seen[seen.len() - 1];
-    assert!(del_uri.ends_with("/vta/memory/delete/0.1"), "{del_uri}");
+    assert!(del_uri.ends_with("/vta/memory/delete/0.2"), "{del_uri}");
     assert_eq!(del.get("key").unwrap(), "user/name");
 }
 
@@ -399,7 +426,7 @@ async fn a_re_cased_list_response_is_an_error_not_an_empty_context() {
     );
     let err = store.list().await.unwrap_err();
     assert!(
-        format!("{err:#}").contains("vta/memory/list/0.1"),
+        format!("{err:#}").contains("vta/memory/list/0.2"),
         "the error should name the task whose shape was violated: {err:#}"
     );
 }
@@ -408,7 +435,9 @@ async fn a_re_cased_list_response_is_an_error_not_an_empty_context() {
 async fn a_list_item_missing_its_value_is_an_error_not_a_skipped_entry() {
     let store = Store::new(
         VtaClient::loopback(Arc::new(DriftedList(
-            json!({ "items": [{ "key": "user/name" }] }),
+            json!({ "items": [{ "contextId": "proj", "key": "user/name", "version": 1,
+                                 "deleted": false, "updatedAt": "2026-11-09T00:00:00Z" }],
+                    "highWatermark": 1 }),
         ))),
         "proj",
     );
@@ -425,7 +454,10 @@ async fn a_put_that_echoes_a_different_key_is_refused() {
     struct WrongKey;
     impl LoopbackSink for WrongKey {
         fn dispatch(&self, _uri: &str, _payload: &Value) -> Result<Value, VtaError> {
-            Ok(json!({ "key": "user/something-else" }))
+            Ok(json!({
+                "contextId": "proj", "key": "user/something-else", "version": 1,
+                "wasCreated": true, "updatedAt": "2026-11-09T00:00:00Z",
+            }))
         }
     }
     let store = Store::new(VtaClient::loopback(Arc::new(WrongKey)), "proj");

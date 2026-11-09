@@ -1,36 +1,34 @@
 //! The memory store: typed operations over the VTA's `vta/memory/*` Trust
-//! Tasks.
+//! Tasks, at 0.2 (`put`, `delete`, `list`) and `get/0.1`.
 //!
-//! Every method here is one Trust Task plus record encoding. There is no
-//! transport code, no hand-rolled retry, and no caching, on purpose:
+//! Every method here is one Trust Task (or one paged sequence of them) plus
+//! record encoding. There is no transport code, no hand-rolled retry, and no
+//! caching, on purpose:
 //!
-//! - **Transport** is `VtaClient`'s. `memory_{put,list,delete}` go through the
+//! - **Transport** is `VtaClient`'s. The memory methods go through the
 //!   generic Trust-Task dispatcher — a real `TrustTask` document, schema-checked
 //!   against the published registry before it goes out, carried on TSP, DIDComm
 //!   or REST depending on what the two DID documents advertise. Nothing in this
 //!   file knows which.
 //! - **Retry** has exactly one owner per failure domain, and for operation
 //!   completion that owner is [`VtaClient::idempotent`]. The two mutating
-//!   methods run inside it (both tasks are classified `RetrySafe` in
-//!   `vta_sdk::retry_safety`); a loop written *around* them here could not hold
-//!   an idempotency key stable across attempts, so it would turn one retried
-//!   operation into two operations.
+//!   methods run inside it; a loop written *around* them here could not hold an
+//!   idempotency key stable across attempts, so it would turn one retried
+//!   operation into two operations. That matters more at 0.2: `put/0.2` is
+//!   classified `Keyed` in `vta_sdk::retry_safety`, because a replayed put takes
+//!   a second version and a device syncing the context would see a change that
+//!   never happened.
 //! - **Caching** would have to answer "stale by how long?" for a store the user
 //!   can also write from `pnm`. Every read is a round trip.
 //!
 //! ## Responses are decoded into the published types
 //!
-//! Each task's request and response shape is generated from the upstream spec
-//! (`trust_tasks_rs::specs::vta::memory::*`) and re-exported by the SDK as
-//! [`MemoryListResponse`] and friends. This module deserializes into those
-//! rather than walking `serde_json::Value` by hand.
-//!
-//! That is not tidiness. Reaching for `resp["items"]` and skipping anything that
-//! does not look right means a renamed or re-cased field arrives as **an empty
-//! list** — the user is told they have no memories, which is both wrong and
-//! believable. Casing drift on wire types is the recurring defect class in this
-//! stack; decoding into the typed shape is what makes it a loud error instead of
-//! a quiet one.
+//! Each task's response is decoded into the type generated from its
+//! specification (`vta_sdk::specs::vta::memory::*`) rather than walked as
+//! `serde_json::Value` by hand. Reaching for `resp["items"]` and skipping
+//! anything that does not look right means a renamed or re-cased field arrives
+//! as **an empty list** — the user is told they have no memories, which is both
+//! wrong and believable. Decoding into the typed shape makes it a loud error.
 //!
 //! The tolerance that *is* deliberate sits one level down: an entry whose
 //! **key** is not `<type>/<slug>` belongs to something else writing into the
@@ -39,16 +37,22 @@
 //!
 //! ## The recall cost
 //!
-//! `memory/list/0.1` returns the whole context and nothing narrower exists, so
-//! [`Store::list`] fetches everything and the filtering happens here. That is a
-//! real cost, and [`Store::list_of_type`] is the single place to change if the
-//! upstream task ever grows a prefix or a cursor.
+//! `list/0.2` takes a key prefix and pages by cursor, so a `--type` recall asks
+//! the VTA for `<type>/` and receives only those; an untyped recall still reads
+//! the whole context, a page at a time. One memory by key is a `get`.
 
 use anyhow::Context as _;
+use serde_json::{Map, Value, json};
 use vta_sdk::client::VtaClient;
-use vta_sdk::protocols::memory::{MemoryDeleteResponse, MemoryListResponse, MemoryPutResponse};
+use vta_sdk::specs::vta::memory::{
+    delete::v0_2 as delete_spec, get::v0_1 as get_spec, list::v0_2 as list_spec,
+    put::v0_2 as put_spec,
+};
 
 use crate::record::{Entry, Hit, MemoryKey, MemoryRecord, MemoryType, rank};
+
+/// Items per `list/0.2` page.
+const PAGE: u64 = 500;
 
 /// A memory store bound to one VTA client and one trust context.
 pub struct Store {
@@ -84,11 +88,11 @@ impl Store {
 
     /// Upsert one memory. A second save of the same `(type, name)` replaces it.
     ///
-    /// Runs under [`VtaClient::idempotent`], which retries transient faults with
-    /// one stable idempotency key. `vta/memory/put/0.1` is classified
-    /// `RetrySafe`, so a replay is a re-upsert of the same value — the point of
-    /// the wrapper is that a websocket blip mid-session does not silently lose
-    /// something the user asked to be remembered.
+    /// Unconditional (`put/0.2` without `expectedVersion`): a save is the user
+    /// asking for this to be remembered now, whatever was there. Runs under
+    /// [`VtaClient::idempotent`], which retries transient faults with one stable
+    /// idempotency key, so a websocket blip mid-session neither loses the save
+    /// nor applies it twice.
     pub async fn save(&self, record: &MemoryRecord) -> anyhow::Result<MemoryKey> {
         let key = MemoryKey::new(record.kind, &record.name)?;
         let key_str = key.to_string();
@@ -96,82 +100,66 @@ impl Store {
 
         let resp = self
             .client
-            .idempotent(|| self.client.memory_put(&self.context_id, &key_str, &value))
+            .idempotent(|| {
+                self.client
+                    .memory_put_versioned(&self.context_id, &key_str, &value, None)
+            })
             .await
             .with_context(|| format!("saving memory `{key}` in context `{}`", self.context_id))?;
 
-        let decoded: MemoryPutResponse = serde_json::from_value(resp)
+        let decoded: put_spec::Response = serde_json::from_value(resp)
             .with_context(|| format!("decoding the response to saving `{key}`"))?;
         // The VTA echoes the key it stored. A mismatch means the value landed
         // somewhere this store cannot address, which is worse than a failure —
         // recall would never find it and the user would think it saved.
-        if decoded.key != key_str {
+        if decoded.key.as_str() != key_str {
             anyhow::bail!(
                 "the VTA stored memory `{}` when `{key_str}` was requested",
-                decoded.key
+                decoded.key.as_str()
             );
         }
         Ok(key)
     }
 
-    /// Every memory in the context.
-    ///
-    /// This is a full read of the context on every call, because
-    /// `vta/memory/list/0.1` returns "every entry in the context, in ascending
-    /// key order" and takes no prefix and no cursor. Fine at the hundreds of
-    /// entries a person accumulates; not a query engine.
+    /// Every memory in the context, a page at a time.
     pub async fn list(&self) -> anyhow::Result<Vec<Entry>> {
         self.list_of_type(None).await
     }
 
-    /// As [`list`](Self::list), narrowed to one type.
-    ///
-    /// The narrowing happens on the **raw key**, before the record's JSON is
-    /// parsed. The wire cost is identical either way — the VTA sends the whole
-    /// context regardless — but a `--type feedback` recall in a context of a
-    /// thousand memories then decodes only the feedback ones. That is the
-    /// entire practical payoff of putting the type in the key.
+    /// As [`list`](Self::list), narrowed to one type — by the VTA, which is
+    /// asked only for keys under `<type>/`.
     ///
     /// Entries whose keys this tool did not write are skipped rather than
     /// erroring, so a context shared with another writer stays usable.
     pub async fn list_of_type(&self, kind: Option<MemoryType>) -> anyhow::Result<Vec<Entry>> {
-        let resp = self
-            .client
-            .memory_list(&self.context_id)
-            .await
-            .with_context(|| format!("listing memories in context `{}`", self.context_id))?;
-
-        // Decode into the published response type, not by hand. A renamed or
-        // re-cased field must fail here; walking the JSON would turn it into an
-        // empty list, and "you have no memories" is a wrong answer the user has
-        // no way to distinguish from a right one.
-        let listed: MemoryListResponse = serde_json::from_value(resp).with_context(|| {
-            format!(
-                "decoding the memory list for context `{}` — the VTA's response did not match \
-                 vta/memory/list/0.1",
-                self.context_id
-            )
-        })?;
-
-        let mut entries = Vec::with_capacity(listed.items.len());
-        for item in listed.items {
-            if let Some(k) = kind
-                && !MemoryKey::raw_key_has_type(&item.key, k)
-            {
-                continue;
+        let mut entries = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut query = Map::new();
+            query.insert("limit".into(), json!(PAGE));
+            if let Some(k) = kind {
+                query.insert("prefix".into(), json!(MemoryKey::prefix(k)));
             }
-            // One level down from the envelope, tolerance is right: a key that
-            // is not `<type>/<slug>` belongs to something else writing into the
-            // same context, and skipping it keeps `list` total.
-            let Ok(key) = MemoryKey::parse(&item.key) else {
-                tracing::debug!(
-                    key = %item.key,
-                    "skipping entry with an unrecognised key shape"
-                );
-                continue;
-            };
-            let record = MemoryRecord::decode(&key, &item.value);
-            entries.push(Entry { key, record });
+            if let Some(c) = &cursor {
+                query.insert("cursor".into(), json!(c));
+            }
+            let resp = self
+                .client
+                .memory_list_page(&self.context_id, query)
+                .await
+                .with_context(|| format!("listing memories in context `{}`", self.context_id))?;
+            let (page, next) = decode_page(resp).with_context(|| {
+                format!(
+                    "decoding the memory list for context `{}` — the VTA's response did not \
+                     match vta/memory/list/0.2",
+                    self.context_id
+                )
+            })?;
+            entries.extend(page);
+            match next {
+                Some(n) => cursor = Some(n),
+                None => break,
+            }
         }
         Ok(entries)
     }
@@ -196,40 +184,93 @@ impl Store {
         Ok(hits)
     }
 
-    /// One memory by key, or `None` if absent.
-    ///
-    /// There is no `memory/get` Trust Task, so this is a `list` plus a lookup.
-    /// Same cost as recall; stated here so the cost is not a surprise.
+    /// One memory by key, or `None` if absent — one `vta/memory/get/0.1`.
     pub async fn get(&self, key: &MemoryKey) -> anyhow::Result<Option<Entry>> {
-        Ok(self.list().await?.into_iter().find(|e| &e.key == key))
+        let key_str = key.to_string();
+        let resp = self
+            .client
+            .memory_get(&self.context_id, &[key_str.as_str()])
+            .await
+            .with_context(|| format!("reading memory `{key}` in context `{}`", self.context_id))?;
+        let got: get_spec::Response = serde_json::from_value(resp)
+            .with_context(|| format!("decoding the response to reading `{key}`"))?;
+        Ok(got.items.into_iter().find_map(|item| {
+            let value = item.value.filter(|_| !item.deleted)?;
+            (item.key.as_str() == key_str).then(|| Entry {
+                key: key.clone(),
+                record: MemoryRecord::decode(key, value.as_str()),
+            })
+        }))
     }
 
-    /// Delete one memory. Absent keys surface the VTA's own `not found`.
+    /// Delete one memory. An absent key is an error, as it always has been.
     ///
-    /// Also under [`VtaClient::idempotent`] — `vta/memory/delete/0.1` is
-    /// `RetrySafe`, and `not found` is not a transient fault, so a replay after
-    /// a delete that did land still reports the deletion rather than retrying
-    /// into a spurious error.
+    /// `delete/0.2` leaves a tombstone, so the user's other devices learn of the
+    /// deletion, and answers a key holding nothing with `existed: false` rather
+    /// than an error. This store keeps refusing that case: "forget X" for an X
+    /// that is not there is more likely a mistyped name than a success. Under
+    /// [`VtaClient::idempotent`], whose idempotency key stays the same across
+    /// attempts, so a retry of a delete that did land is answered with that
+    /// delete's own response (`existed: true`), not a spurious "not found".
     pub async fn forget(&self, key: &MemoryKey) -> anyhow::Result<()> {
         let key_str = key.to_string();
         let resp = self
             .client
-            .idempotent(|| self.client.memory_delete(&self.context_id, &key_str))
+            .idempotent(|| {
+                self.client
+                    .memory_delete_versioned(&self.context_id, &key_str, None)
+            })
             .await
             .with_context(|| {
                 format!("forgetting memory `{key}` in context `{}`", self.context_id)
             })?;
 
-        let decoded: MemoryDeleteResponse = serde_json::from_value(resp)
+        let decoded: delete_spec::Response = serde_json::from_value(resp)
             .with_context(|| format!("decoding the response to forgetting `{key}`"))?;
-        if decoded.key != key_str {
+        if decoded.key.as_str() != key_str {
             anyhow::bail!(
                 "the VTA deleted memory `{}` when `{key_str}` was requested",
-                decoded.key
+                decoded.key.as_str()
+            );
+        }
+        if !decoded.existed {
+            anyhow::bail!(
+                "memory `{key}` not found in context `{}` — nothing to forget",
+                self.context_id
             );
         }
         Ok(())
     }
+}
+
+/// One `list/0.2` page: its live entries this tool can read, and the cursor
+/// for the next page.
+fn decode_page(resp: Value) -> anyhow::Result<(Vec<Entry>, Option<String>)> {
+    let page: list_spec::Response = serde_json::from_value(resp)?;
+    let mut entries = Vec::with_capacity(page.items.len());
+    for item in page.items {
+        if item.deleted {
+            continue;
+        }
+        // Values are asked for (the default), so a live item without one is a
+        // malformed response, not an entry to skip.
+        let Some(value) = item.value else {
+            anyhow::bail!(
+                "live memory `{}` came back without its value",
+                item.key.as_str()
+            );
+        };
+        // One level down from the envelope, tolerance is right: a key that is
+        // not `<type>/<slug>` belongs to something else writing into the same
+        // context, and skipping it keeps `list` total.
+        let Ok(key) = MemoryKey::parse(item.key.as_str()) else {
+            tracing::debug!(key = %item.key.as_str(), "skipping entry with an unrecognised key shape");
+            continue;
+        };
+        let record = MemoryRecord::decode(&key, value.as_str());
+        entries.push(Entry { key, record });
+    }
+    Ok((entries, page.next_cursor))
 }
 
 #[cfg(test)]

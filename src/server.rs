@@ -481,26 +481,45 @@ mod tests {
         assert!(err.message.contains("user, feedback, project or reference"));
     }
 
-    /// Just enough of the VTA's memory keyspace for the read tools: `list`
-    /// returns every entry, in key order.
+    /// Just enough of the VTA's memory keyspace for the read tools:
+    /// `list/0.2` returns the live items under `prefix`, in key order, and
+    /// `get/0.1` answers each named key.
     #[derive(Default)]
     struct Keyspace(Mutex<BTreeMap<String, String>>);
 
+    fn item(k: &str, v: &str) -> Value {
+        json!({
+            "contextId": "ctx", "key": k, "value": v, "version": 1,
+            "deleted": false, "updatedAt": "2026-11-09T00:00:00Z",
+        })
+    }
+
     impl LoopbackSink for Keyspace {
-        fn dispatch(&self, type_uri: &str, _payload: &Value) -> Result<Value, VtaError> {
-            if !type_uri.ends_with("/vta/memory/list/0.1") {
-                return Err(VtaError::Validation(format!(
-                    "unexpected task `{type_uri}`"
-                )));
+        fn dispatch(&self, type_uri: &str, payload: &Value) -> Result<Value, VtaError> {
+            let entries = self.0.lock().unwrap();
+            if type_uri.ends_with("/vta/memory/list/0.2") {
+                let prefix = payload.get("prefix").and_then(Value::as_str).unwrap_or("");
+                let items: Vec<Value> = entries
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(prefix))
+                    .map(|(k, v)| item(k, v))
+                    .collect();
+                return Ok(json!({ "items": items, "highWatermark": 1 }));
             }
-            let items: Vec<Value> = self
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(k, v)| json!({ "key": k, "value": v }))
-                .collect();
-            Ok(json!({ "items": items }))
+            if type_uri.ends_with("/vta/memory/get/0.1") {
+                let (mut items, mut missing) = (Vec::new(), Vec::new());
+                for k in payload["keys"].as_array().into_iter().flatten() {
+                    let k = k.as_str().unwrap_or_default();
+                    match entries.get(k) {
+                        Some(v) => items.push(item(k, v)),
+                        None => missing.push(json!(k)),
+                    }
+                }
+                return Ok(json!({ "items": items, "missing": missing }));
+            }
+            Err(VtaError::Validation(format!(
+                "unexpected task `{type_uri}`"
+            )))
         }
     }
 
