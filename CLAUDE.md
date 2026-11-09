@@ -147,14 +147,15 @@ macOS user with a working `pnm` that no VTA was configured. `vta-sdk`'s
 `agent_connect::default_sessions_dir` still has this bug.
 
 **Setup writes nothing until it has connected as the new identity and listed
-memories.** The probe is `memory/list/0.1` specifically, not a cheaper `whoami`:
+memories.** The probe is `memory/list/0.2` specifically, not a cheaper `whoami`:
 listing is the operation gated on exactly what setup just arranged.
 
 ## The retrieval constraint
 
-`vta/memory/list/0.1` returns every entry in the context, ascending key order.
-No prefix, no cursor, no search. Everything in `record.rs` and `store.rs`
-follows from that:
+`vta/memory/list/0.2` pages a context in ascending key order and can narrow by
+key prefix, but has no search: ranking happens here. (0.1, which this crate no
+longer sends, returned the whole context with no prefix at all.) Everything in
+`record.rs` and `store.rs` follows from that:
 
 - Keys are `<type>/<slug>` so a type filter runs on the raw key, before decode
   (`MemoryKey::raw_key_has_type` / `Store::list_of_type`).

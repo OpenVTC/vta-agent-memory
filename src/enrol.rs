@@ -227,7 +227,7 @@ pub struct ConnectArgs {
 /// Authenticate with the granted identity, **rotate off it**, prove the result
 /// reaches the context, and keep it.
 ///
-/// The proof is a real `vta/memory/list/0.1`, not a cheaper `whoami`: listing is
+/// The proof is a real `vta/memory/list/0.2`, not a cheaper `whoami`: listing is
 /// the operation gated on exactly what the grant was supposed to arrange, and a
 /// `whoami` that succeeds tells you the key authenticates and nothing about
 /// whether it can reach the memories.

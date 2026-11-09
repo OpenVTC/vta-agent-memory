@@ -3,7 +3,7 @@
 //!
 //! # Why there is a record shape at all
 //!
-//! `vta/memory/{put,list,delete}/0.1` stores a `(contextId, key) -> value`
+//! `vta/memory/*` (put/delete/list 0.2, get 0.1) stores a `(contextId, key) -> value`
 //! string and nothing else. `list` returns **every entry in the context, in
 //! ascending key order — no prefix, no cursor, no search** (see
 //! `docs/05-design-notes/appstate-store.md` upstream, which cites exactly this

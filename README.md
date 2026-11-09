@@ -3,7 +3,7 @@
 Durable memory for Claude Code, stored in **your own Verifiable Trust Agent**
 rather than in the tool.
 
-Memories are ordinary `vta/memory/{put,list,delete}/0.1` Trust Tasks against a
+Memories are ordinary `vta/memory/*` Trust Tasks (`put`, `delete` and `list` at 0.2, `get` at 0.1) against a
 VTA you control. They are scoped to one trust context, audited on the VTA, and
 included in its encrypted backups. Revoking this machine's access is one
 `pnm acl delete`.
@@ -150,7 +150,7 @@ Everything rides a flow the VTI stack already has:
 | Find its way in | `resolve_vta_endpoint` against the VTA's DID document |
 | Authorize it | `acl/create`, role `application`, scoped to one context |
 | Hold the key | the SDK session store (OS keyring), never this tool's config |
-| Prove it | a real `vta/memory/list/0.1` **as the rotated identity** |
+| Prove it | a real `vta/memory/list/0.2` **as the rotated identity** |
 
 `setup` additionally uses `pnm`'s config and keyring session to find the VTA and
 make the grant without a second person.
@@ -199,9 +199,8 @@ one you ended up on.
 
 ## Design notes worth knowing
 
-**Retrieval happens on this side of the wire.** `memory/list/0.1` returns *every
-entry in the context, in ascending key order* — no prefix, no cursor, no search.
-So:
+**Retrieval happens on this side of the wire.** `memory/list/0.2` pages a
+context in key order and narrows by key prefix, but does not search. So:
 
 - Keys are structured `<type>/<slug>`, which lets a type filter run on the raw
   key before any record is decoded.
