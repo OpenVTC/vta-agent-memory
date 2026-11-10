@@ -29,6 +29,7 @@ src/
   config.rs    ~/.config/vta-agent-memory/config.json (0600)
   store.rs     typed ops over vta/memory/* — the only VTA-facing code
   record.rs    the record shape, key encoding, and recall ranking
+  authorship.rs  signing records on save, verifying author + location on read
   server.rs    the six MCP tools
 tests/
   memory_roundtrip.rs        Store end-to-end against an in-process fake VTA
@@ -149,6 +150,16 @@ macOS user with a working `pnm` that no VTA was configured. `vta-sdk`'s
 **Setup writes nothing until it has connected as the new identity and listed
 memories.** The probe is `memory/list/0.2` specifically, not a cheaper `whoami`:
 listing is the operation gated on exactly what setup just arranged.
+
+**Every record is signed by its writer, and nothing is returned as memory until
+that is checked.** `Store::save` refuses without a `Signer`; `Store::check` is
+the one place a stored value becomes an `Entry`, and a record that fails is a
+`Refused`, never an `Entry`. Three rules in `authorship.rs` are load-bearing:
+verify over the value **as stored** (a re-serialised struct drops fields a newer
+writer signed); a `v >= 2` record with no `proof` is refused, not downgraded to
+unattributed; and the resolver is `did:key`-only, so a stored record can never
+make recall fetch a URL. The signer is loaded from the session store **after**
+connecting — the first connect of an enrolled identity rotates its key.
 
 ## The retrieval constraint
 

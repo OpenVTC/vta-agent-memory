@@ -228,6 +228,20 @@ in the context before the user has typed anything. The limits are checked where 
 record comes in, never on decode, so a memory stored before they existed — or by
 another tool — stays readable and forgettable.
 
+**Every memory names its author, and the VTA is not trusted to keep it honest.**
+A trust context can be granted to several DIDs — other devices, other agents —
+and the VTA stores whatever any of them puts. So each record is signed by the
+writer's own `did:key` (a Data Integrity proof, the same primitive Data Rooms put
+on a sealed record body), naming its `author` and the `(contextId, key)` it was
+written to. Every read checks it. A record that was edited after signing, copied
+to another key or context, or claims an author other than its signer is
+**refused**: it is not returned as memory, and recall, list and the session-start
+hook name it and say why. Records from before signing (v1) still read, marked
+`unattributed`; a v2 record with its signature stripped is refused rather than
+downgraded. Verification is `did:key`-only and does no network I/O, so a stored
+record cannot make recall fetch anything. `doctor` shows the DID this machine
+signs as.
+
 **Memory is not application state.** "Forget everything" has to stay a safe thing
 for a user to ask, which it stops being the moment account state lives here. The
 VTA's `vta/app-state/*/1.0` family — versioned, namespaced, with a change feed —

@@ -29,13 +29,19 @@
 //! lives here. That belongs in `vta/app-state/*/1.0`, which is versioned,
 //! namespaced, and has a change feed.
 
+use crate::authorship::Authorship;
 use crate::fence::Fence;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Wire version of [`MemoryRecord`]. Bump only for a shape change readers
 /// cannot absorb; new optional fields do not need it.
-pub const RECORD_VERSION: u8 = 1;
+///
+/// 2 is the signed record (#31): it names its `author` and the `(contextId,
+/// key)` it was written to, and carries a `proof` over all of it. A reader
+/// treats a v2 record *without* a proof as tampered with, which is why this is
+/// a version and not just new optional fields — see [`crate::authorship`].
+pub const RECORD_VERSION: u8 = 2;
 
 // Limits on a memory a caller saves. A memory is a note, not a document, and
 // whatever one save stores can be pasted into every later session's context,
@@ -244,6 +250,26 @@ pub struct MemoryRecord {
     pub links: Vec<String>,
     /// RFC 3339, set on every write.
     pub updated_at: String,
+
+    // ---- v2: authorship. Set by `authorship::Signer::sign`, never by a caller,
+    // and only believed once `authorship::verify` has checked them against the
+    // proof and the place the record was found.
+    /// The writer's DID — the proof's signer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// `operator` or `agent`, as the writer stated it. A string, not an enum,
+    /// so a kind a later version adds does not make the whole record undecodable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_kind: Option<String>,
+    /// The trust context the record was written to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
+    /// The storage key the record was written to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The writer's Data Integrity proof over everything above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<serde_json::Value>,
 }
 
 impl MemoryRecord {
@@ -263,6 +289,11 @@ impl MemoryRecord {
             body: body.into(),
             links,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            author: None,
+            author_kind: None,
+            context_id: None,
+            key: None,
+            proof: None,
         }
     }
 
@@ -284,6 +315,11 @@ impl MemoryRecord {
                 body: value.to_string(),
                 links: Vec::new(),
                 updated_at: String::new(),
+                author: None,
+                author_kind: None,
+                context_id: None,
+                key: None,
+                proof: None,
             },
         }
     }
@@ -384,11 +420,32 @@ fn first_line(s: &str) -> String {
     }
 }
 
-/// One entry as it came back from the VTA.
+/// One entry as it came back from the VTA, and who it can be attributed to.
+///
+/// Only entries that passed [`crate::authorship::verify`] become an `Entry`;
+/// one that failed is a [`crate::authorship::Refused`] instead, so holding an
+/// `Entry` means its `authorship` has been checked.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub key: MemoryKey,
     pub record: MemoryRecord,
+    pub authorship: Authorship,
+}
+
+impl Entry {
+    /// [`MemoryRecord::summary`] plus who wrote it — what recall returns.
+    pub fn summary(&self) -> serde_json::Value {
+        let mut v = self.record.summary(&self.key);
+        v["author"] = self.authorship.to_json();
+        v
+    }
+
+    /// [`MemoryRecord::full`] plus who wrote it — what get returns.
+    pub fn full(&self) -> serde_json::Value {
+        let mut v = self.record.full(&self.key);
+        v["author"] = self.authorship.to_json();
+        v
+    }
 }
 
 /// A ranked recall hit.
@@ -464,6 +521,7 @@ mod tests {
         Entry {
             key: MemoryKey::new(kind, name).unwrap(),
             record: MemoryRecord::new(kind, name, desc, body, vec![]),
+            authorship: Authorship::Unattributed,
         }
     }
 

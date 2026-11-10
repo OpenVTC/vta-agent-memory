@@ -24,6 +24,7 @@ use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
+use vta_agent_memory::authorship::Refused;
 use vta_agent_memory::config::{ALLOW_OPERATOR_LOGIN_ENV, Config, operator_login_allowed_by_env};
 use vta_agent_memory::fence::{Fence, Provenance};
 use vta_agent_memory::record::{self, MemoryKey, MemoryType};
@@ -258,7 +259,17 @@ async fn open(config_path: &std::path::Path) -> anyhow::Result<(Config, Store)> 
     cfg.identity
         .ensure_permitted(operator_login_allowed_by_env())?;
     let client = cfg.to_agent_connect().connect().await?;
-    let store = Store::new(client, cfg.context_id.clone()).with_purpose(cfg.purpose());
+    // After connecting, which is what rotates a freshly enrolled key.
+    let signer = match cfg.signer() {
+        Ok(s) => s,
+        Err(e) => {
+            client.shutdown().await;
+            return Err(e);
+        }
+    };
+    let store = Store::new(client, cfg.context_id.clone())
+        .with_purpose(cfg.purpose())
+        .with_signer(signer);
     Ok((cfg, store))
 }
 
@@ -318,11 +329,14 @@ async fn recall(
         let kind = parse_kind(kind.as_deref())?;
         let limit = limit.unwrap_or(cfg.recall_limit);
         let result = store.recall(&query.unwrap_or_default(), kind, limit).await;
-        let hits = finish(store, result).await?;
-        let entries: Vec<_> = hits.iter().map(|h| &h.entry).collect();
-        let empty = entries.is_empty();
+        let recall = finish(store, result).await?;
+        let entries: Vec<_> = recall.hits.iter().map(|h| &h.entry).collect();
+        let empty = entries.is_empty() && recall.refused.is_empty();
         let cap = hook_mode.then_some(MAX_HOOK_CONTEXT_BYTES);
-        Ok::<_, anyhow::Error>((render_memories(&cfg.context_id, entries, full, cap), empty))
+        Ok::<_, anyhow::Error>((
+            render_memories(&cfg.context_id, entries, &recall.refused, full, cap),
+            empty,
+        ))
     }
     .await;
 
@@ -356,13 +370,14 @@ async fn list(config_path: &std::path::Path, kind: Option<String>) -> anyhow::Re
     let (cfg, store) = open(config_path).await?;
     let kind = parse_kind(kind.as_deref())?;
     let result = store.list_of_type(kind).await;
-    let mut entries = finish(store, result).await?;
-    entries.sort_by_key(|e| e.key.to_string());
+    let mut listing = finish(store, result).await?;
+    listing.entries.sort_by_key(|e| e.key.to_string());
     println!(
         "{}",
         render_memories(
             &cfg.context_id,
-            entries.iter().collect::<Vec<_>>(),
+            listing.entries.iter().collect::<Vec<_>>(),
+            &listing.refused,
             false,
             None
         )
@@ -393,11 +408,37 @@ async fn doctor(config_path: &std::path::Path) -> anyhow::Result<()> {
     let client = cfg.to_agent_connect().connect().await?;
     println!("transport   {:?}", client.trust_task_transport());
 
-    let store = Store::new(client, cfg.context_id.clone()).with_purpose(cfg.purpose());
+    let signer = match cfg.signer() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("signs as    unavailable");
+            client.shutdown().await;
+            return Err(e);
+        }
+    };
+    println!("signs as    {} ({})", signer.did(), signer.kind().as_str());
+
+    let store = Store::new(client, cfg.context_id.clone())
+        .with_purpose(cfg.purpose())
+        .with_signer(signer);
     let result = store.list().await;
     match finish(store, result).await {
-        Ok(entries) => {
-            println!("memories    {}", entries.len());
+        Ok(listing) => {
+            let unattributed = listing
+                .entries
+                .iter()
+                .filter(|e| e.authorship == vta_agent_memory::authorship::Authorship::Unattributed)
+                .count();
+            println!(
+                "memories    {} ({unattributed} unattributed)",
+                listing.entries.len()
+            );
+            if !listing.refused.is_empty() {
+                println!("refused     {}", listing.refused.len());
+                for r in &listing.refused {
+                    println!("  {} — {}", r.key, r.reason);
+                }
+            }
             println!("\nOK — the memory service can read and write this context.");
             Ok(())
         }
@@ -431,6 +472,10 @@ fn parse_kind(raw: Option<&str>) -> anyhow::Result<Option<MemoryType>> {
 
 /// Render memories as markdown for a hook or a terminal.
 ///
+/// Each memory not written by this agent says so — `unattributed`, or which
+/// writer — and records that were refused are listed by key with the reason,
+/// so neither a forged memory nor its absence goes unremarked.
+///
 /// With `max_bytes`, the whole returned string (preamble and delimiters
 /// included) stays within it. Memories that do not fit are left out, the one
 /// that crosses the limit is cut short, and a marker saying so goes inside the
@@ -438,10 +483,11 @@ fn parse_kind(raw: Option<&str>) -> anyhow::Result<Option<MemoryType>> {
 fn render_memories(
     context_id: &str,
     entries: Vec<&record::Entry>,
+    refused: &[Refused],
     full: bool,
     max_bytes: Option<usize>,
 ) -> String {
-    if entries.is_empty() {
+    if entries.is_empty() && refused.is_empty() {
         return format!("No memories stored in trust context `{context_id}`.");
     }
     // Recalled text is data, not instructions (F8). A context can have more
@@ -495,6 +541,9 @@ fn render_memories(
                 "\n- **{}** (`{}`) — {}",
                 e.record.name, e.key, e.record.description
             );
+            if let Some(note) = e.authorship.note() {
+                item.push_str(&format!(" _[{note}]_"));
+            }
             if full && !e.record.body.is_empty() {
                 item.push_str(&format!("\n\n  {}", e.record.body.replace('\n', "\n  ")));
             }
@@ -505,6 +554,25 @@ fn render_memories(
             shown += 1;
         }
         complete = push(&mut out, "\n");
+    }
+    if complete && !refused.is_empty() {
+        complete = push(
+            &mut out,
+            &format!(
+                "\n## refused\n\n{} stored record(s) failed their signature check and are not \
+                 shown as memory:\n",
+                refused.len()
+            ),
+        );
+        for r in refused {
+            if !complete {
+                break;
+            }
+            complete = push(&mut out, &format!("\n- `{}` — {}", r.key, r.reason));
+        }
+        if complete {
+            complete = push(&mut out, "\n");
+        }
     }
 
     if !complete {
@@ -590,6 +658,7 @@ mod tests {
         Entry {
             key: MemoryKey::new(kind, name).unwrap(),
             record: MemoryRecord::new(kind, name, desc, body, vec![]),
+            authorship: vta_agent_memory::authorship::Authorship::Unattributed,
         }
     }
 
@@ -597,7 +666,7 @@ mod tests {
     fn an_empty_context_renders_as_a_sentence_not_an_empty_heading() {
         // This string is pasted straight into a session's context by the hook;
         // a bare heading with nothing under it reads like a failure.
-        let out = render_memories("proj", vec![], false, None);
+        let out = render_memories("proj", vec![], &[], false, None);
         assert!(out.contains("No memories stored"));
         assert!(!out.contains('#'));
     }
@@ -606,7 +675,7 @@ mod tests {
     fn memories_are_grouped_by_type_in_a_fixed_order() {
         let a = entry(MemoryType::Project, "P", "a project", "body");
         let b = entry(MemoryType::User, "U", "a user fact", "body");
-        let out = render_memories("proj", vec![&a, &b], false, None);
+        let out = render_memories("proj", vec![&a, &b], &[], false, None);
         let user_at = out.find("## user").expect("user section");
         let project_at = out.find("## project").expect("project section");
         assert!(
@@ -616,12 +685,56 @@ mod tests {
     }
 
     #[test]
+    fn authorship_is_noted_and_refusals_are_listed() {
+        use vta_agent_memory::authorship::{AuthorKind, Authorship};
+        let mine = Entry {
+            authorship: Authorship::Verified {
+                author: "did:key:z6MkMine".into(),
+                kind: Some(AuthorKind::Agent),
+                by_this_agent: true,
+            },
+            ..entry(MemoryType::User, "Mine", "written here", "")
+        };
+        let theirs = Entry {
+            authorship: Authorship::Verified {
+                author: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into(),
+                kind: Some(AuthorKind::Operator),
+                by_this_agent: false,
+            },
+            ..entry(MemoryType::User, "Theirs", "written elsewhere", "")
+        };
+        let old = entry(MemoryType::User, "Old", "from before signing", "");
+        let refused = [Refused {
+            key: "feedback/deploys".into(),
+            reason: "its signature does not verify".into(),
+        }];
+        let out = render_memories("proj", vec![&mine, &theirs, &old], &refused, false, None);
+
+        let line = |name: &str| out.lines().find(|l| l.contains(name)).unwrap().to_string();
+        assert!(
+            !line("Mine").contains("_["),
+            "this agent's own memory needs no note"
+        );
+        assert!(
+            line("Theirs").contains("written by operator did:key:z6Mkha…ta2doK"),
+            "{out}"
+        );
+        assert!(line("Old").contains("_[unattributed]_"));
+        assert!(out.contains("## refused"));
+        assert!(out.contains("`feedback/deploys` — its signature does not verify"));
+
+        // Refusals alone are still worth rendering.
+        let only = render_memories("proj", vec![], &refused, false, None);
+        assert!(only.contains("feedback/deploys"), "{only}");
+    }
+
+    #[test]
     fn summaries_omit_bodies_unless_asked() {
         let e = entry(MemoryType::User, "U", "one line", "the long body");
-        let brief = render_memories("proj", vec![&e], false, None);
+        let brief = render_memories("proj", vec![&e], &[], false, None);
         assert!(brief.contains("one line"));
         assert!(!brief.contains("the long body"), "bodies cost context");
-        assert!(render_memories("proj", vec![&e], true, None).contains("the long body"));
+        assert!(render_memories("proj", vec![&e], &[], true, None).contains("the long body"));
     }
 
     /// The opening and closing delimiters of a render, which must each appear
@@ -652,6 +765,7 @@ mod tests {
         let out = render_memories(
             "proj",
             entries.iter().collect(),
+            &[],
             true,
             Some(MAX_HOOK_CONTEXT_BYTES),
         );
@@ -672,11 +786,17 @@ mod tests {
     fn a_render_within_the_cap_is_unchanged_by_it() {
         let a = entry(MemoryType::User, "U", "one line", "short body");
         let b = entry(MemoryType::Project, "P", "another", "short body");
-        let capped = render_memories("proj", vec![&a, &b], true, Some(MAX_HOOK_CONTEXT_BYTES));
+        let capped = render_memories(
+            "proj",
+            vec![&a, &b],
+            &[],
+            true,
+            Some(MAX_HOOK_CONTEXT_BYTES),
+        );
         assert!(!capped.contains("[Truncated"));
         fence_bounds(&capped);
         // Only the nonce differs between two renders.
-        let uncapped = render_memories("proj", vec![&a, &b], true, None);
+        let uncapped = render_memories("proj", vec![&a, &b], &[], true, None);
         assert_eq!(capped.len(), uncapped.len());
     }
 
@@ -686,7 +806,7 @@ mod tests {
     #[test]
     fn a_single_oversized_body_is_cut_on_a_char_boundary() {
         let e = entry(MemoryType::Reference, "Legacy", "old", &"é".repeat(60_000));
-        let out = render_memories("proj", vec![&e], true, Some(MAX_HOOK_CONTEXT_BYTES));
+        let out = render_memories("proj", vec![&e], &[], true, Some(MAX_HOOK_CONTEXT_BYTES));
         assert!(out.len() <= MAX_HOOK_CONTEXT_BYTES, "{}", out.len());
         assert!(out.contains("**Legacy**"), "the memory is still named");
         assert!(out.contains("[Truncated: 0 of 1 memories shown in full"));
@@ -699,7 +819,7 @@ mod tests {
         let entries: Vec<Entry> = (0..4)
             .map(|i| entry(MemoryType::Project, &format!("m {i}"), "d", &body))
             .collect();
-        let out = render_memories("proj", entries.iter().collect(), true, None);
+        let out = render_memories("proj", entries.iter().collect(), &[], true, None);
         assert!(out.len() > MAX_HOOK_CONTEXT_BYTES);
         assert!(!out.contains("[Truncated"));
     }

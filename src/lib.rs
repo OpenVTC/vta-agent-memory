@@ -10,6 +10,7 @@
 //! Start at [`record`] — the key encoding and the ranking there are where the
 //! design decisions live. [`store`] is the only module that talks to a VTA.
 
+pub mod authorship;
 pub mod config;
 pub mod enrol;
 pub mod fence;
