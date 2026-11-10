@@ -541,10 +541,7 @@ fn render_memories(
                 "\n- **{}** (`{}`) — {}",
                 e.record.name, e.key, e.record.description
             );
-            let notes: Vec<String> = [e.record.basis_note(), e.authorship.note()]
-                .into_iter()
-                .flatten()
-                .collect();
+            let notes = e.notes();
             if !notes.is_empty() {
                 item.push_str(&format!(" _[{}]_", notes.join("; ")));
             }
@@ -659,15 +656,14 @@ mod tests {
     use record::{Entry, MemoryRecord};
 
     fn entry(kind: MemoryType, name: &str, desc: &str, body: &str) -> Entry {
-        Entry {
-            key: MemoryKey::new(kind, name).unwrap(),
-            record: MemoryRecord::new(kind, name, desc, body, vec![]).with_provenance(
+        Entry::local(
+            MemoryKey::new(kind, name).unwrap(),
+            MemoryRecord::new(kind, name, desc, body, vec![]).with_provenance(
                 vta_agent_memory::provenance::Basis::Declared,
                 None,
                 vec![],
             ),
-            authorship: vta_agent_memory::authorship::Authorship::Unattributed,
-        }
+        )
     }
 
     #[test]

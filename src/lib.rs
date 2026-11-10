@@ -15,6 +15,7 @@ pub mod config;
 pub mod enrol;
 pub mod fence;
 pub mod lazy;
+pub mod lifecycle;
 pub mod pnm;
 pub mod provenance;
 pub mod record;

@@ -5,7 +5,9 @@ argument-hint: [memory key or description]
 
 Forget this memory: $ARGUMENTS
 
-This is permanent — there is no undo and no grace window.
+This is permanent — the memory and its history are deleted, with no undo and no
+grace window. If the user wants it marked wrong rather than gone, offer
+`memory_retract` instead: it stops the memory recalling and keeps a record of why.
 
 If the argument is already a key (`type/name`), confirm what it is with
 `memory_get` and show the user before deleting. If it is a description, use

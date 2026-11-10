@@ -2,7 +2,7 @@
 //!
 //! Claude Code starts an MCP server when a session starts and takes what it
 //! gets. A server that exits before speaking MCP does not appear as a broken
-//! memory service — it does not appear at all: the six tools are simply absent,
+//! memory service — it does not appear at all: the memory tools are simply absent,
 //! and the model has no way to tell anyone why, because the thing it would use
 //! to say so is the thing that is missing.
 //!

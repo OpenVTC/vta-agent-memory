@@ -250,6 +250,19 @@ downgraded. Verification is `did:key`-only and does no network I/O, so a stored
 record cannot make recall fetch anything. `doctor` shows the DID this machine
 signs as.
 
+**Nothing a save replaces is lost, and two writers cannot silently overwrite
+each other.** A save reads the current version, copies it verbatim — still signed
+by its own author — to `archive/<type>/<slug>/v<n>` (outside every type prefix, so
+recall never sees it; at most five per memory), and then writes **conditionally**
+on the version it read. A writer that got in first wins, and the losing save
+comes back as `saved: false` with the winner, not as an overwrite. A caller that
+read a memory earlier passes that `version` as `expectedVersion`. Memories also
+have a lifecycle — `active`, `deprecated`, `disputed` (both recalled lower, with a
+reason) or `retracted` (a tombstone that never recalls) — plus `validUntil`
+(recall drops it after) and `reviewAfter` (recall flags it `stale`). Retract is
+the "this was wrong" path; `forget` is still the hard delete, and takes the
+history with it.
+
 **Memory is not application state.** "Forget everything" has to stay a safe thing
 for a user to ask, which it stops being the moment account state lives here. The
 VTA's `vta/app-state/*/1.0` family — versioned, namespaced, with a change feed —
@@ -319,7 +332,7 @@ An entry created before this release grants `any`, under which
 The plugin does not disappear. The MCP server starts without contacting the VTA
 and connects on the first memory call, so:
 
-- The six tools are always present, and a failure comes back as a tool error the
+- The nine tools are always present, and a failure comes back as a tool error the
   model can relay — "run `vta-agent-memory setup`" rather than silence.
 - `memory_context` answers *without* connecting, so you can still ask which VTA
   and context you are pointed at while it is down.
@@ -337,7 +350,7 @@ cargo test
 ```
 
 `tests/mcp_starts_without_a_vta.rs` drives the real binary over stdio with no
-config at all, asserting it completes an MCP handshake, offers all six tools, and
+config at all, asserting it completes an MCP handshake, offers all nine tools, and
 returns an actionable error from a tool call. That is a property about process
 lifetime, so it can only be observed by running the thing.
 

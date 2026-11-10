@@ -47,6 +47,10 @@ struct FakeMemoryKeyspace {
     seen: Mutex<Vec<(String, Value)>>,
     /// The purposes the caller's entry lists; `None` is `any`.
     granted: Mutex<Option<Vec<String>>>,
+    /// A write another writer makes right after the next `get` is answered:
+    /// `(context, key, value)`. Lets a test land a save in the window between a
+    /// store's read and its conditional write.
+    race: Mutex<Option<(String, String, String)>>,
 }
 
 impl FakeMemoryKeyspace {
@@ -54,8 +58,25 @@ impl FakeMemoryKeyspace {
         self.seen.lock().unwrap().clone()
     }
 
+    /// Live memories, not counting history copies.
     fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|(_, k)| !k.starts_with("archive/"))
+            .count()
+    }
+
+    /// History copies held for `key` in `context`.
+    fn history_len(&self, context: &str, key: &str) -> usize {
+        let prefix = format!("archive/{key}/");
+        self.entries
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|(c, k)| c == context && k.starts_with(&prefix))
+            .count()
     }
 
     fn record(context_id: &str, key: &str, value: &str, version: u64) -> Value {
@@ -102,6 +123,36 @@ impl LoopbackSink for FakeMemoryKeyspace {
             u if u.ends_with("/vta/memory/put/0.3") => {
                 let key = field(payload, "key")?;
                 let value = field(payload, "value")?;
+                // `expectedVersion`: 0 is create-only, n requires version n.
+                // A failed precondition is `versionConflict` with the current
+                // version and value, as the VTA sends it.
+                if let Some(expected) = payload.get("expectedVersion").and_then(Value::as_u64) {
+                    let current = self
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .get(&(context_id.to_string(), key.to_string()))
+                        .cloned();
+                    let reason = match (&current, expected) {
+                        (None, 0) => None,
+                        (Some(_), 0) => Some("recordExists"),
+                        (None, _) => Some("recordAbsent"),
+                        (Some((_, v)), e) if *v != e => Some("versionMismatch"),
+                        _ => None,
+                    };
+                    if let Some(reason) = reason {
+                        let mut details = json!({ "reason": reason });
+                        if let Some((v, ver)) = current {
+                            details["currentVersion"] = json!(ver);
+                            details["currentValue"] = json!(v);
+                        }
+                        return Err(VtaError::Rejected {
+                            code: "vta/memory/put:versionConflict".into(),
+                            message: "precondition failed".into(),
+                            details: Some(details),
+                        });
+                    }
+                }
                 let mut counter = self.counter.lock().unwrap();
                 *counter += 1;
                 let created = self
@@ -132,6 +183,7 @@ impl LoopbackSink for FakeMemoryKeyspace {
                 Ok(json!({ "items": items, "highWatermark": *self.counter.lock().unwrap() }))
             }
             u if u.ends_with("/vta/memory/get/0.2") => {
+                let race = self.race.lock().unwrap().take();
                 let entries = self.entries.lock().unwrap();
                 let (mut items, mut missing) = (Vec::new(), Vec::new());
                 for k in payload["keys"].as_array().into_iter().flatten() {
@@ -140,6 +192,10 @@ impl LoopbackSink for FakeMemoryKeyspace {
                         Some((v, ver)) => items.push(Self::record(context_id, k, v, *ver)),
                         None => missing.push(json!(k)),
                     }
+                }
+                drop(entries);
+                if let Some((c, k, v)) = race {
+                    self.plant(&c, &k, v);
                 }
                 Ok(json!({ "items": items, "missing": missing }))
             }
@@ -422,7 +478,10 @@ async fn the_payloads_on_the_wire_are_camel_case_and_context_scoped() {
     store.forget(&key).await.unwrap();
 
     let seen = vta.recorded();
-    let (put_uri, put) = &seen[0];
+    let (put_uri, put) = seen
+        .iter()
+        .find(|(u, _)| u.contains("/memory/put/"))
+        .expect("a put");
     assert!(put_uri.ends_with("/vta/memory/put/0.3"), "{put_uri}");
     assert_eq!(put.get("contextId").unwrap(), "proj");
     assert_eq!(put.get("key").unwrap(), "user/name");
@@ -438,7 +497,10 @@ async fn the_payloads_on_the_wire_are_camel_case_and_context_scoped() {
     assert_eq!(stored.kind, MemoryType::User);
     assert!(!stored.updated_at.is_empty(), "every write is stamped");
 
-    let (del_uri, del) = &seen[seen.len() - 1];
+    let (del_uri, del) = seen
+        .iter()
+        .find(|(u, _)| u.contains("/memory/delete/"))
+        .expect("a delete");
     assert!(del_uri.ends_with("/vta/memory/delete/0.3"), "{del_uri}");
     assert_eq!(del.get("key").unwrap(), "user/name");
 }
@@ -504,7 +566,10 @@ async fn a_put_that_echoes_a_different_key_is_refused() {
     // it and the user would believe the save succeeded.
     struct WrongKey;
     impl LoopbackSink for WrongKey {
-        fn dispatch(&self, _uri: &str, _payload: &Value) -> Result<Value, VtaError> {
+        fn dispatch(&self, uri: &str, _payload: &Value) -> Result<Value, VtaError> {
+            if uri.contains("/memory/get/") {
+                return Ok(json!({ "items": [], "missing": ["user/name"] }));
+            }
             Ok(json!({
                 "contextId": "proj", "key": "user/something-else", "version": 1,
                 "wasCreated": true, "updatedAt": "2026-11-09T00:00:00Z",
@@ -648,7 +713,13 @@ async fn every_operation_names_its_purpose() {
     store.forget(&key).await.unwrap();
 
     let seen = vta.recorded();
-    assert_eq!(seen.len(), 4, "{seen:?}");
+    for op in ["get", "put", "list", "delete"] {
+        assert!(
+            seen.iter()
+                .any(|(u, _)| u.contains(&format!("/memory/{op}/"))),
+            "{op} was exercised: {seen:?}"
+        );
+    }
     for (uri, payload) in &seen {
         assert_eq!(payload["purpose"], "personalisation", "{uri}: {payload}");
     }
@@ -1103,4 +1174,383 @@ async fn recall_prefers_what_the_user_said_over_what_was_inferred() {
         .hits;
     assert_eq!(hits[0].entry.record.name, "Tabs said");
     assert_eq!(hits[1].entry.record.name, "Tabs guess");
+}
+
+// ---- #33: lifecycle ---------------------------------------------------------
+
+/// A save that replaces a memory keeps the replaced version, verbatim and still
+/// attributed to its own author, and links to it.
+#[tokio::test]
+async fn a_replacing_save_keeps_the_previous_version_in_history() {
+    let vta = Arc::new(FakeMemoryKeyspace::default());
+    let laptop = store_on(&vta, "proj");
+    let phone = store_on(&vta, "proj");
+    let first_author = laptop.signer().unwrap().did().to_string();
+
+    let key = laptop
+        .save(&record(MemoryType::Project, "Gateway", "first", "one"))
+        .await
+        .unwrap();
+    let v1 = laptop.get(&key).await.unwrap().unwrap().version;
+    phone
+        .save(&record(MemoryType::Project, "Gateway", "second", "two"))
+        .await
+        .unwrap();
+
+    let current = laptop.get(&key).await.unwrap().unwrap();
+    assert_eq!(current.record.description, "second");
+    let supersedes = current.summary()["supersedes"].clone();
+    assert_eq!(supersedes["version"], v1);
+    assert_eq!(supersedes["key"], format!("archive/project/gateway/v{v1}"));
+
+    let history = laptop.history(&key).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].record.description, "first");
+    assert_eq!(history[0].version, v1);
+    assert_eq!(
+        history[0].authorship,
+        Authorship::Verified {
+            author: first_author,
+            kind: Some(AuthorKind::Agent),
+            by_this_agent: true,
+        },
+        "the old version keeps its own author's signature"
+    );
+
+    // History never leaks into a listing or a recall.
+    assert_eq!(laptop.list().await.unwrap().entries.len(), 1);
+    assert_eq!(laptop.recall("", None, 50).await.unwrap().hits.len(), 1);
+}
+
+/// History is bounded, oldest first out.
+#[tokio::test]
+async fn history_keeps_only_the_most_recent_versions() {
+    use vta_agent_memory::lifecycle::MAX_HISTORY;
+
+    let (store, vta) = store_with("proj");
+    for i in 0..MAX_HISTORY + 3 {
+        store
+            .save(&record(MemoryType::User, "Name", &format!("v{i}"), "x"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(vta.history_len("proj", "user/name"), MAX_HISTORY);
+    let key = MemoryKey::parse("user/name").unwrap();
+    let history = store.history(&key).await.unwrap();
+    assert_eq!(history.len(), MAX_HISTORY);
+    assert_eq!(
+        history[0].record.description,
+        format!("v{}", MAX_HISTORY + 1),
+        "newest first"
+    );
+}
+
+/// The caller read version n; somebody else saved since. The save is refused,
+/// nothing is overwritten, and the winner comes back.
+#[tokio::test]
+async fn a_save_based_on_a_stale_read_is_rejected_with_the_winner() {
+    use vta_agent_memory::store::SaveOutcome;
+
+    let vta = Arc::new(FakeMemoryKeyspace::default());
+    let laptop = store_on(&vta, "proj");
+    let phone = store_on(&vta, "proj");
+    let key = laptop
+        .save(&record(MemoryType::User, "Editor", "uses vim", "x"))
+        .await
+        .unwrap();
+    let read = laptop.get(&key).await.unwrap().unwrap().version;
+
+    phone
+        .save(&record(
+            MemoryType::User,
+            "Editor",
+            "switched to helix",
+            "x",
+        ))
+        .await
+        .unwrap();
+
+    let outcome = laptop
+        .save_versioned(
+            &record(MemoryType::User, "Editor", "uses emacs", "x"),
+            Some(read),
+        )
+        .await
+        .unwrap();
+    let SaveOutcome::Conflict { conflict, .. } = outcome else {
+        panic!("a save from a stale read must not land: {outcome:?}");
+    };
+    let winner = conflict.current.expect("the winner").expect("verified");
+    assert_eq!(winner.record.description, "switched to helix");
+    assert_eq!(conflict.current_version, Some(winner.version));
+    assert_eq!(
+        laptop.get(&key).await.unwrap().unwrap().record.description,
+        "switched to helix",
+        "nothing was overwritten"
+    );
+
+    // Retried against the winner's version, it lands.
+    let outcome = laptop
+        .save_versioned(
+            &record(MemoryType::User, "Editor", "uses emacs", "x"),
+            conflict.current_version,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SaveOutcome::Saved { .. }), "{outcome:?}");
+}
+
+/// Another writer lands between this store's read and its write. The VTA's
+/// precondition catches it, and the winner comes back rather than being lost.
+#[tokio::test]
+async fn a_concurrent_save_in_the_read_write_window_is_rejected_by_the_vta() {
+    use vta_agent_memory::store::SaveOutcome;
+
+    let vta = Arc::new(FakeMemoryKeyspace::default());
+    let laptop = store_on(&vta, "proj");
+    let phone = store_on(&vta, "proj");
+    laptop
+        .save(&record(MemoryType::User, "Editor", "uses vim", "x"))
+        .await
+        .unwrap();
+
+    // What the phone would store, signed by the phone, slipped in after the
+    // laptop's read.
+    phone
+        .save(&record(
+            MemoryType::User,
+            "Editor",
+            "switched to helix",
+            "x",
+        ))
+        .await
+        .unwrap();
+    let phones = vta.value("proj", "user/editor");
+    laptop
+        .save(&record(MemoryType::User, "Editor", "back to vim", "x"))
+        .await
+        .unwrap();
+    *vta.race.lock().unwrap() = Some(("proj".into(), "user/editor".into(), phones));
+
+    let outcome = laptop
+        .save_versioned(&record(MemoryType::User, "Editor", "uses emacs", "x"), None)
+        .await
+        .unwrap();
+    let SaveOutcome::Conflict { conflict, .. } = outcome else {
+        panic!("the VTA's precondition must catch the race: {outcome:?}");
+    };
+    assert!(
+        conflict.reason.contains("versionMismatch"),
+        "{}",
+        conflict.reason
+    );
+    let winner = conflict.current.unwrap().unwrap();
+    assert_eq!(winner.record.description, "switched to helix");
+
+    // `save` (no expected version) reports the lost race as an error.
+    *vta.race.lock().unwrap() = Some((
+        "proj".into(),
+        "user/editor".into(),
+        vta.value("proj", "user/editor"),
+    ));
+    let err = laptop
+        .save(&record(MemoryType::User, "Editor", "uses emacs", "x"))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("nothing was overwritten"),
+        "{err:#}"
+    );
+}
+
+/// `expectedVersion: 0` means "this must be new".
+#[tokio::test]
+async fn expecting_a_new_memory_refuses_to_replace_an_existing_one() {
+    use vta_agent_memory::store::SaveOutcome;
+
+    let (store, _vta) = store_with("proj");
+    store
+        .save(&record(MemoryType::User, "Name", "first", "x"))
+        .await
+        .unwrap();
+    let outcome = store
+        .save_versioned(&record(MemoryType::User, "Name", "second", "x"), Some(0))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, SaveOutcome::Conflict { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// Retract keeps a tombstone that says why; recall leaves it out; get and
+/// list still show it; the content survives only in history.
+#[tokio::test]
+async fn retracting_leaves_a_tombstone_and_forgetting_removes_everything() {
+    use vta_agent_memory::lifecycle::Status;
+
+    let (store, vta) = store_with("proj");
+    let key = store
+        .save(&record(
+            MemoryType::Feedback,
+            "Deploy fridays",
+            "fridays are fine for deploys",
+            "the body",
+        ))
+        .await
+        .unwrap();
+    store
+        .set_status(&key, Status::Retracted, "the user never said this", None)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .recall("deploy", None, 8)
+            .await
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+    let tomb = store
+        .get(&key)
+        .await
+        .unwrap()
+        .expect("a tombstone, not nothing");
+    assert_eq!(tomb.standing.status, Some(Status::Retracted));
+    assert!(tomb.record.body.is_empty(), "the content is withdrawn");
+    assert_eq!(tomb.record.name, "Deploy fridays");
+    let summary = tomb.summary();
+    assert_eq!(summary["status"], "retracted");
+    assert_eq!(summary["statusReason"], "the user never said this");
+    assert_eq!(store.list().await.unwrap().entries.len(), 1);
+    assert_eq!(
+        store.history(&key).await.unwrap()[0].record.body,
+        "the body"
+    );
+
+    // Forget is the hard delete: memory and history both go.
+    store.forget(&key).await.unwrap();
+    assert_eq!(vta.len(), 0);
+    assert_eq!(vta.history_len("proj", "feedback/deploy-fridays"), 0);
+    assert!(store.get(&key).await.unwrap().is_none());
+}
+
+/// Disputed and deprecated memories still recall — ranked below an equally
+/// relevant active one, with their status and reason shown.
+#[tokio::test]
+async fn disputed_and_deprecated_memories_are_demoted_not_hidden() {
+    use vta_agent_memory::lifecycle::Status;
+
+    let (store, _vta) = store_with("proj");
+    for name in ["Indent a", "Indent b", "Indent c"] {
+        store
+            .save(&record(
+                MemoryType::User,
+                name,
+                "uses tabs for indentation",
+                "x",
+            ))
+            .await
+            .unwrap();
+    }
+    let a = MemoryKey::parse("user/indent-a").unwrap();
+    let b = MemoryKey::parse("user/indent-b").unwrap();
+    store
+        .set_status(&a, Status::Disputed, "user says spaces now", None)
+        .await
+        .unwrap();
+    store
+        .set_status(&b, Status::Deprecated, "replaced by indent c", None)
+        .await
+        .unwrap();
+
+    let hits = store
+        .recall("tabs indentation", None, 8)
+        .await
+        .unwrap()
+        .hits;
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0].entry.record.name, "Indent c");
+    let disputed = hits.iter().find(|h| h.entry.key == a).unwrap();
+    assert_eq!(disputed.entry.summary()["status"], "disputed");
+    assert_eq!(
+        disputed.entry.summary()["statusReason"],
+        "user says spaces now"
+    );
+    assert!(disputed.score < hits[0].score);
+}
+
+/// `validUntil` past: recall leaves it out. `reviewAfter` past: recall keeps
+/// it, flagged stale.
+#[tokio::test]
+async fn expired_memories_drop_out_and_stale_ones_are_flagged() {
+    let (store, _vta) = store_with("proj");
+    let mut leave = record(MemoryType::Project, "On leave", "the user is on leave", "x");
+    leave.valid_until = Some("2020-01-01T00:00:00+00:00".into());
+    let mut style = record(
+        MemoryType::User,
+        "Leave style",
+        "prefers terse leave notes",
+        "x",
+    );
+    style.review_after = Some("2020-01-01T00:00:00+00:00".into());
+    let mut future = record(
+        MemoryType::User,
+        "Leave plan",
+        "leave planned for later",
+        "x",
+    );
+    future.valid_until = Some("2999-01-01T00:00:00+00:00".into());
+    for r in [&leave, &style, &future] {
+        store.save(r).await.unwrap();
+    }
+
+    let hits = store.recall("leave", None, 8).await.unwrap().hits;
+    let names: Vec<&str> = hits.iter().map(|h| h.entry.record.name.as_str()).collect();
+    assert!(!names.contains(&"On leave"), "{names:?}");
+    assert!(names.contains(&"Leave plan"), "{names:?}");
+    let stale = hits
+        .iter()
+        .find(|h| h.entry.record.name == "Leave style")
+        .unwrap();
+    assert_eq!(stale.entry.summary()["stale"], true);
+
+    let listing = store.list().await.unwrap();
+    let expired = listing
+        .entries
+        .iter()
+        .find(|e| e.record.name == "On leave")
+        .expect("list still shows it");
+    assert_eq!(expired.summary()["expired"], true);
+}
+
+/// A forged record can be retracted (that withdraws it) but not disputed or
+/// deprecated, which would re-sign content nobody vouches for.
+#[tokio::test]
+async fn a_refused_record_can_only_be_retracted() {
+    use vta_agent_memory::lifecycle::Status;
+
+    let (store, vta) = store_with("proj");
+    let key = store
+        .save(&record(MemoryType::User, "Name", "d", "x"))
+        .await
+        .unwrap();
+    let mut v: Value = serde_json::from_str(&vta.value("proj", "user/name")).unwrap();
+    v["body"] = json!("forged");
+    vta.plant("proj", "user/name", v.to_string());
+
+    let err = store
+        .set_status(&key, Status::Disputed, "looks wrong", None)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("only be retracted"), "{err:#}");
+
+    store
+        .set_status(&key, Status::Retracted, "forged", None)
+        .await
+        .unwrap();
+    let listing = store.list().await.unwrap();
+    assert!(listing.refused.is_empty(), "the forgery is withdrawn");
+    assert_eq!(listing.entries[0].summary()["status"], "retracted");
 }

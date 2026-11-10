@@ -6,9 +6,10 @@ description: How to use the user's VTA-backed memory — what is worth saving, w
 # Agent memory (VTA-backed)
 
 The user's durable memory lives in their own Verifiable Trust Agent, not in this
-tool and not in a file in the repo. You reach it through six MCP tools:
-`memory_recall`, `memory_get`, `memory_save`, `memory_forget`, `memory_list`,
-`memory_context`.
+tool and not in a file in the repo. You reach it through nine MCP tools:
+`memory_recall`, `memory_get`, `memory_save`, `memory_list`, `memory_context`,
+the status changes `memory_dispute`, `memory_deprecate` and `memory_retract`, and
+the hard delete `memory_forget`.
 
 The whole store is scoped to one **VTA trust context**. That context is the
 isolation boundary — an agent scoped to a different one cannot read, write, or
@@ -179,16 +180,46 @@ Recall first. If a memory already covers it, update that one — `memory_save`
 with the same name replaces it — rather than creating a near-duplicate. Two
 memories that disagree are worse than neither.
 
+When you update a memory you read, pass its `version` as `expectedVersion`. If
+another device or agent changed it since, the save is **not** written and you get
+`saved: false` with what is there now (`current`). Do not blindly save again:
+read it, merge if your change still makes sense, and save with the new
+`currentVersion` — or tell the user it changed under you. Nothing a save
+replaces is lost; the previous version goes to the memory's history
+(`memory_get` with `history: true`).
+
+If a fact has a shelf life — "on leave until the 1st", "using the staging
+cluster this sprint" — give it a `validUntil` date and recall will stop returning
+it after that. If it is a preference that may drift, give it a `reviewAfter`
+date; recall will then flag it `stale`, and you should confirm it with the user
+before relying on it.
+
 Write the description as the answer to: *would I want this loaded at the start of
 a session?* If the honest answer is no, do not save it.
 
+## When a memory is wrong or out of date
+
+Prefer marking it to deleting it. Each takes a one-line `reason`, which is
+shown with the memory from then on:
+
+| Tool | When | Effect |
+|---|---|---|
+| `memory_dispute` | Somebody says it is wrong, but it is not settled. | Still recalls, ranked lower, shown as `disputed`. |
+| `memory_deprecate` | It was true, it is not any more, or another memory replaced it. | Still recalls, ranked lower, shown as `deprecated`. |
+| `memory_retract` | It is wrong, or should never have been saved. | Never recalls again. A tombstone says it existed and why it was withdrawn. |
+
+Saving the memory again settles a dispute: the new version is active. A status
+change is a new version signed by you, so the memory's `author` becomes you; the
+original author's version is in its history.
+
 ## Forgetting
 
-`memory_forget` is permanent. There is no undo and no grace window.
+`memory_forget` is permanent: the memory *and its history* are deleted. There is
+no undo and no grace window.
 
-Only forget when the user asks, or when you have just saved a memory that
-supersedes the old one. If a memory turns out to be wrong, forgetting it is
-right — a wrong memory is worse than a missing one.
+Only forget when the user asks for something to be gone — not merely marked
+wrong. If a memory turns out to be wrong, `memory_retract` it; that keeps the
+fact that it was once believed, and why it was withdrawn.
 
 If the user asks you to forget *everything*, confirm the scope first, list what
 is there with `memory_list`, and only then delete. `memory_list` returns one page
