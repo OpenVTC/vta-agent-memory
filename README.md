@@ -211,6 +211,14 @@ context in key order and narrows by key prefix, but does not search. So:
 - Ranking is weighted token containment (name 4, description 2, body 1). Crude
   and predictable, chosen over embeddings because the VTA offers no vector index
   and a scoring function nobody can predict is worse than one everybody can.
+- Relevance is then weighted by **basis** — what kind of claim the memory is:
+  `declared` (the user said it) and evidenced `verified` count fully, `observed`
+  0.9, `unstated` (pre-provenance records) 0.8, `inferred` and evidence-less
+  `verified` 0.6. A nudge, not an override: a strong match on an inference still
+  beats a passing mention of a statement. `confidence` is shown but never ranked
+  on — two authors' estimates are not on one scale. The vocabulary (`basis`,
+  `confidence`, `evidence`) is the one Data Rooms publish, so a record moved
+  between memory and a room keeps its meaning.
 
 Cost is a full read of the context per recall. Fine at the hundreds of memories a
 person accumulates. If that stops being true, the fix is upstream — a

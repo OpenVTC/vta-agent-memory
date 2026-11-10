@@ -14,6 +14,9 @@ Follow the `agent-memory` skill. In particular:
    of a session?" — recall ranks on it.
 4. For `feedback` and `project`, put the **why** in the body.
 5. Convert relative dates to absolute ones.
+6. State the `basis`. `/remember` is usually the user telling you something, so
+   it is usually `declared` — but if what you are saving is your own reading of
+   what they said, it is `inferred`.
 
 If the argument is empty, look at what has happened in this session and propose
 what is worth remembering — then ask before saving. If the thing to remember is

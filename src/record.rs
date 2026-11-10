@@ -31,6 +31,7 @@
 
 use crate::authorship::Authorship;
 use crate::fence::Fence;
+use crate::provenance::{self, Basis, Evidence};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -251,6 +252,21 @@ pub struct MemoryRecord {
     /// RFC 3339, set on every write.
     pub updated_at: String,
 
+    // ---- provenance (#32): what kind of claim this is. See `crate::provenance`.
+    // Strings and raw values, not the typed forms, so a basis or citation kind a
+    // later version adds does not make the whole record undecodable; the types
+    // are enforced where a record comes in (`check_limits`).
+    /// `declared`, `observed`, `verified` or `inferred`. Absent on records that
+    /// predate provenance, which read as `unstated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// The author's own estimate, 0 to 1, that this is correct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    /// What it cites in support: [`crate::provenance::Evidence`] items.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<serde_json::Value>,
+
     // ---- v2: authorship. Set by `authorship::Signer::sign`, never by a caller,
     // and only believed once `authorship::verify` has checked them against the
     // proof and the place the record was found.
@@ -289,12 +305,41 @@ impl MemoryRecord {
             body: body.into(),
             links,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            basis: None,
+            confidence: None,
+            evidence: Vec::new(),
             author: None,
             author_kind: None,
             context_id: None,
             key: None,
             proof: None,
         }
+    }
+
+    /// State what kind of claim this is.
+    pub fn with_provenance(
+        mut self,
+        basis: Basis,
+        confidence: Option<f64>,
+        evidence: Vec<Evidence>,
+    ) -> Self {
+        self.basis = Some(basis.as_str().to_string());
+        self.confidence = confidence;
+        self.evidence = evidence
+            .iter()
+            .map(|e| serde_json::to_value(e).expect("evidence serialises"))
+            .collect();
+        self
+    }
+
+    /// The basis, if it is one this version knows.
+    pub fn basis(&self) -> Option<Basis> {
+        self.basis.as_deref().and_then(Basis::parse)
+    }
+
+    /// How much this record's basis counts in ranking.
+    pub fn basis_weight(&self) -> u32 {
+        provenance::weight(self.basis(), !self.evidence.is_empty())
     }
 
     /// Decode a stored value.
@@ -315,6 +360,9 @@ impl MemoryRecord {
                 body: value.to_string(),
                 links: Vec::new(),
                 updated_at: String::new(),
+                basis: None,
+                confidence: None,
+                evidence: Vec::new(),
                 author: None,
                 author_kind: None,
                 context_id: None,
@@ -375,6 +423,22 @@ impl MemoryRecord {
                 link.chars().count()
             ));
         }
+        // Provenance is checked only where it is stated. `memory_save` always
+        // states it; a caller that does not is building a record by hand.
+        if let Some(raw) = &self.basis {
+            let basis = Basis::parse(raw).ok_or_else(|| {
+                format!(
+                    "unknown `basis` `{raw}`; expected declared, observed, verified or inferred"
+                )
+            })?;
+            let evidence: Vec<Evidence> = self
+                .evidence
+                .iter()
+                .map(|v| serde_json::from_value(v.clone()))
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("malformed `evidence`: {e}"))?;
+            provenance::check(basis, self.confidence, &evidence)?;
+        }
         Ok(())
     }
 
@@ -388,7 +452,7 @@ impl MemoryRecord {
     /// projection means every consumer of `summary`/`full` inherits it. (F8.)
     pub fn summary(&self, key: &MemoryKey) -> serde_json::Value {
         let links: Vec<String> = self.links.iter().map(|l| Fence::sanitize(l)).collect();
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "key": key.to_string(),
             "name": Fence::sanitize(&self.name),
             "type": self.kind.as_str(),
@@ -397,14 +461,32 @@ impl MemoryRecord {
             "updatedAt": self.updated_at,
             // Stated on every projection so a reader never has to infer it.
             "trust": "untrusted-data",
-        })
+        });
+        let prov = provenance::to_json(self.basis.as_deref(), self.confidence, &self.evidence);
+        if let (Some(v), Some(p)) = (v.as_object_mut(), prov.as_object()) {
+            v.extend(p.clone());
+        }
+        v
     }
 
-    /// The full form `memory_get` returns.
+    /// The full form `memory_get` returns: the summary, the body, and what the
+    /// memory cites. Citations are identifiers, never fetched.
     pub fn full(&self, key: &MemoryKey) -> serde_json::Value {
         let mut v = self.summary(key);
         v["body"] = serde_json::Value::String(Fence::sanitize(&self.body));
+        if !self.evidence.is_empty() {
+            v["evidence"] = serde_json::Value::Array(self.evidence.clone());
+        }
         v
+    }
+
+    /// A short note on what kind of claim this is, for a rendered listing.
+    pub fn basis_note(&self) -> Option<String> {
+        provenance::note(
+            self.basis.as_deref(),
+            self.confidence,
+            !self.evidence.is_empty(),
+        )
     }
 }
 
@@ -464,9 +546,17 @@ pub struct Hit {
 /// everybody can. Weights: name 4, description 2, body 1, so a memory *about*
 /// the query outranks one that merely mentions it.
 ///
-/// An empty query ranks everything equally, which makes recall degrade into
-/// list — the right behaviour for a session-start hook that just wants what is
-/// there. Ties break on `updated_at` descending, then key, so output is stable.
+/// Relevance is then multiplied by the record's basis weight
+/// ([`provenance::weight`]): a stated preference outranks an inference that
+/// matches the query equally well, but a strong match on an inference still
+/// beats a passing mention of a stated fact. `confidence` is never ranked on —
+/// two authors' estimates are not on one scale.
+///
+/// An empty query scores everything 0, which makes recall degrade into list —
+/// the right behaviour for a session-start hook that just wants what is there.
+/// Ties break on basis weight, then `updated_at` descending, then key, so what
+/// the user stated survives a limit ahead of what was inferred, and output is
+/// stable.
 pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
     let terms: Vec<String> = query
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -483,7 +573,7 @@ pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
                 let name = entry.record.name.to_ascii_lowercase();
                 let desc = entry.record.description.to_ascii_lowercase();
                 let body = entry.record.body.to_ascii_lowercase();
-                terms
+                let relevance: u32 = terms
                     .iter()
                     .map(|t| {
                         let mut s = 0;
@@ -498,7 +588,8 @@ pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
                         }
                         s
                     })
-                    .sum()
+                    .sum();
+                relevance * entry.record.basis_weight()
             };
             Hit { entry, score }
         })
@@ -507,6 +598,12 @@ pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
+            .then_with(|| {
+                b.entry
+                    .record
+                    .basis_weight()
+                    .cmp(&a.entry.record.basis_weight())
+            })
             .then_with(|| b.entry.record.updated_at.cmp(&a.entry.record.updated_at))
             .then_with(|| a.entry.key.to_string().cmp(&b.entry.key.to_string()))
     });
@@ -648,6 +745,115 @@ mod tests {
             "a",
         );
         assert_eq!(hits[0].score, 0);
+    }
+
+    fn with_basis(mut e: Entry, basis: Basis, updated_at: &str) -> Entry {
+        e.record = e.record.with_provenance(basis, None, vec![]);
+        e.record.updated_at = updated_at.to_string();
+        e
+    }
+
+    #[test]
+    fn a_statement_outranks_an_equally_relevant_inference_even_a_newer_one() {
+        let stated = with_basis(
+            entry(
+                MemoryType::User,
+                "Short answers",
+                "prefers short answers",
+                "x",
+            ),
+            Basis::Declared,
+            "2026-01-01T00:00:00Z",
+        );
+        let guessed = with_basis(
+            entry(
+                MemoryType::User,
+                "Short replies",
+                "prefers short answers",
+                "x",
+            ),
+            Basis::Inferred,
+            "2026-11-01T00:00:00Z",
+        );
+        let hits = rank(vec![guessed, stated], "short answers");
+        assert_eq!(hits[0].entry.record.name, "Short answers");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn basis_is_a_nudge_not_an_override() {
+        // A memory *about* the query, inferred, still beats a stated memory
+        // that merely mentions it in passing.
+        let about = with_basis(
+            entry(MemoryType::Project, "Gateway", "the gateway rollout", "x"),
+            Basis::Inferred,
+            "2026-01-01T00:00:00Z",
+        );
+        let mentions = with_basis(
+            entry(
+                MemoryType::Project,
+                "Other",
+                "something else",
+                "the gateway",
+            ),
+            Basis::Declared,
+            "2026-01-01T00:00:00Z",
+        );
+        let hits = rank(vec![mentions, about], "gateway");
+        assert_eq!(hits[0].entry.record.name, "Gateway");
+    }
+
+    #[test]
+    fn with_no_query_stated_memories_survive_a_limit_ahead_of_inferred_ones() {
+        let stated = with_basis(
+            entry(MemoryType::User, "A", "a", "a"),
+            Basis::Declared,
+            "2026-01-01T00:00:00Z",
+        );
+        let guessed = with_basis(
+            entry(MemoryType::User, "B", "b", "b"),
+            Basis::Inferred,
+            "2026-11-01T00:00:00Z",
+        );
+        let hits = rank(vec![guessed, stated], "");
+        assert!(hits.iter().all(|h| h.score == 0));
+        assert_eq!(hits[0].entry.record.name, "A");
+    }
+
+    #[test]
+    fn verified_without_evidence_ranks_as_an_inference() {
+        let mut unsupported = entry(MemoryType::User, "X", "x", "x");
+        unsupported.record.basis = Some("verified".into());
+        let inferred = with_basis(entry(MemoryType::User, "Y", "y", "y"), Basis::Inferred, "");
+        assert_eq!(
+            unsupported.record.basis_weight(),
+            inferred.record.basis_weight()
+        );
+    }
+
+    #[test]
+    fn a_record_from_before_provenance_reads_as_unstated() {
+        let key = MemoryKey::parse("user/old").unwrap();
+        let r = MemoryRecord::decode(
+            &key,
+            r#"{"v":1,"name":"Old","type":"user","description":"d","body":"b","updatedAt":""}"#,
+        );
+        assert_eq!(r.basis(), None);
+        assert_eq!(r.summary(&key)["basis"], "unstated");
+        assert_eq!(r.basis_note().as_deref(), Some("basis unstated"));
+    }
+
+    #[test]
+    fn an_unknown_basis_from_a_later_writer_does_not_break_decoding() {
+        let key = MemoryKey::parse("user/new").unwrap();
+        let r = MemoryRecord::decode(
+            &key,
+            r#"{"v":2,"name":"New","type":"user","description":"d","body":"b","updatedAt":"",
+                "basis":"testified","evidence":[{"kind":"notarised","ref":"x"}]}"#,
+        );
+        assert_eq!(r.name, "New", "decoded as a record, not a foreign value");
+        assert_eq!(r.basis(), None);
+        assert_eq!(r.full(&key)["evidence"][0]["kind"], "notarised");
     }
 
     #[test]

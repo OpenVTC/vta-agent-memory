@@ -541,8 +541,12 @@ fn render_memories(
                 "\n- **{}** (`{}`) — {}",
                 e.record.name, e.key, e.record.description
             );
-            if let Some(note) = e.authorship.note() {
-                item.push_str(&format!(" _[{note}]_"));
+            let notes: Vec<String> = [e.record.basis_note(), e.authorship.note()]
+                .into_iter()
+                .flatten()
+                .collect();
+            if !notes.is_empty() {
+                item.push_str(&format!(" _[{}]_", notes.join("; ")));
             }
             if full && !e.record.body.is_empty() {
                 item.push_str(&format!("\n\n  {}", e.record.body.replace('\n', "\n  ")));
@@ -657,7 +661,11 @@ mod tests {
     fn entry(kind: MemoryType, name: &str, desc: &str, body: &str) -> Entry {
         Entry {
             key: MemoryKey::new(kind, name).unwrap(),
-            record: MemoryRecord::new(kind, name, desc, body, vec![]),
+            record: MemoryRecord::new(kind, name, desc, body, vec![]).with_provenance(
+                vta_agent_memory::provenance::Basis::Declared,
+                None,
+                vec![],
+            ),
             authorship: vta_agent_memory::authorship::Authorship::Unattributed,
         }
     }
@@ -720,6 +728,19 @@ mod tests {
             "{out}"
         );
         assert!(line("Old").contains("_[unattributed]_"));
+        let guessed = Entry {
+            record: MemoryRecord::new(MemoryType::User, "Guess", "d", "", vec![]).with_provenance(
+                vta_agent_memory::provenance::Basis::Inferred,
+                Some(0.6),
+                vec![],
+            ),
+            ..mine.clone()
+        };
+        let inferred = render_memories("proj", vec![&guessed], &[], false, None);
+        assert!(
+            inferred.contains("_[inferred, confidence 0.60]_"),
+            "{inferred}"
+        );
         assert!(out.contains("## refused"));
         assert!(out.contains("`feedback/deploys` — its signature does not verify"));
 
