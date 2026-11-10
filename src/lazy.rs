@@ -118,13 +118,29 @@ impl LazyStore {
                 // shares one across an rmcp handler). `block_on` from the
                 // blocking pool is supported — what is forbidden is blocking
                 // inside an async task, which this deliberately is not.
-                let client = tokio::task::spawn_blocking(move || {
-                    tokio::runtime::Handle::current().block_on(cfg.to_agent_connect().connect())
+                let (client, signer) = tokio::task::spawn_blocking(move || {
+                    let client = tokio::runtime::Handle::current()
+                        .block_on(cfg.to_agent_connect().connect())?;
+                    // After connecting: the first connect of a freshly enrolled
+                    // identity rotates its key, and records are signed with the
+                    // one that survives. A session store read, so it belongs on
+                    // this blocking thread too.
+                    match cfg.signer() {
+                        Ok(signer) => Ok((client, signer)),
+                        Err(e) => {
+                            tokio::runtime::Handle::current().block_on(client.shutdown());
+                            Err(e)
+                        }
+                    }
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("the VTA connection task failed: {e}"))??;
 
-                Ok::<_, anyhow::Error>(Store::new(client, context_id).with_purpose(purpose))
+                Ok::<_, anyhow::Error>(
+                    Store::new(client, context_id)
+                        .with_purpose(purpose)
+                        .with_signer(signer),
+                )
             })
             .await
     }

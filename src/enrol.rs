@@ -274,7 +274,16 @@ pub async fn connect(args: ConnectArgs) -> anyhow::Result<SetupOutcome> {
     // Verify over the connection just made, then close it — a DIDComm client
     // owns a mediator socket `Drop` cannot release, and the mediator allows one
     // per DID, so leaving it open would duel the next connect.
-    let store = crate::store::Store::new(client, pending.context_id.clone());
+    // The signer is loaded here, after the connect that rotated the key, so a
+    // session that cannot sign fails enrolment rather than every later save.
+    let signer = match cfg.signer() {
+        Ok(s) => s,
+        Err(e) => {
+            client.shutdown().await;
+            return Err(e);
+        }
+    };
+    let store = crate::store::Store::new(client, pending.context_id.clone()).with_signer(signer);
     let listed = store.list().await;
     store.shutdown().await;
     let memories_found = listed
@@ -285,6 +294,7 @@ pub async fn connect(args: ConnectArgs) -> anyhow::Result<SetupOutcome> {
                 pending.context_id
             )
         })?
+        .entries
         .len();
 
     cfg.save(&args.config_path)

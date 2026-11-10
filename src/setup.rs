@@ -387,7 +387,16 @@ pub async fn verify(cfg: &Config) -> anyhow::Result<usize> {
         cfg.to_agent_connect().connect().await.with_context(|| {
             format!("connecting as the {} just configured", cfg.identity.label())
         })?;
-    let store = crate::store::Store::new(client, cfg.context_id.clone());
+    // Loaded after connecting, which is what rotates a freshly enrolled key: a
+    // session that cannot sign memory records fails setup, not every save.
+    let signer = match cfg.signer() {
+        Ok(s) => s,
+        Err(e) => {
+            client.shutdown().await;
+            return Err(e);
+        }
+    };
+    let store = crate::store::Store::new(client, cfg.context_id.clone()).with_signer(signer);
     let result = store.list().await.with_context(|| {
         format!(
             "the identity connected but cannot read memories in context `{}` — check \
@@ -396,7 +405,7 @@ pub async fn verify(cfg: &Config) -> anyhow::Result<usize> {
         )
     });
     let count = match result {
-        Ok(entries) => entries.len(),
+        Ok(listing) => listing.entries.len(),
         Err(e) => {
             store.shutdown().await;
             return Err(e);

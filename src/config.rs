@@ -224,6 +224,38 @@ impl Config {
             ..Default::default()
         }
     }
+
+    /// The key this identity signs the memory records it saves with: the
+    /// session's own `did:key` and private key, read from the session store.
+    ///
+    /// Call it **after** connecting. A freshly enrolled identity's first
+    /// connect rotates the throwaway key the operator saw to a new one, and
+    /// records must be signed by the key that survives — the one the ACL now
+    /// names. The private key is read from the session store and held in
+    /// memory only; it is never written here.
+    pub fn signer(&self) -> anyhow::Result<crate::authorship::Signer> {
+        let id = &self.identity;
+        let session =
+            vta_sdk::session::SessionStore::new(&id.service_name, id.sessions_dir.clone())
+                .loaded_session(&id.session_key)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no session `{}` in the session store, so there is no key to sign memories \
+                     with — run `vta-agent-memory setup`",
+                        id.session_key
+                    )
+                })?;
+        let kind = if id.operator_login {
+            crate::authorship::AuthorKind::Operator
+        } else {
+            crate::authorship::AuthorKind::Agent
+        };
+        crate::authorship::Signer::from_did_key(
+            &session.client_did,
+            &session.private_key_multibase,
+            kind,
+        )
+    }
 }
 
 #[cfg(test)]

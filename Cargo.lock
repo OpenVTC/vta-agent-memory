@@ -5437,13 +5437,15 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vta-agent-memory"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "dirs",
+ "ed25519-dalek",
  "getrandom 0.4.3",
+ "multibase",
  "proptest",
  "rmcp",
  "schemars 1.2.3",

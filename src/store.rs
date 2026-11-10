@@ -47,6 +47,15 @@
 //! same context and is skipped. A malformed envelope is a bug; an unfamiliar
 //! neighbour is not.
 //!
+//! ## Every record is signed, and checked on the way back
+//!
+//! [`save`](Store::save) signs the record with this process's own key, bound to
+//! the `(contextId, key)` it is written to; every read checks that signature
+//! before the record is returned as memory. A record that fails is returned as
+//! a [`Refused`] — its key and the reason — never as an [`Entry`]. Unsigned
+//! records from before signing existed come back marked unattributed. See
+//! [`crate::authorship`].
+//!
 //! ## The recall cost
 //!
 //! `list/0.2` takes a key prefix and pages by cursor, so a `--type` recall asks
@@ -62,6 +71,7 @@ use vta_sdk::specs::vta::memory::{
     put::v0_3 as put_spec,
 };
 
+use crate::authorship::{Refused, Signer, verify};
 use crate::record::{Entry, Hit, MemoryKey, MemoryRecord, MemoryType, rank};
 
 /// Items per `list/0.3` page.
@@ -76,6 +86,28 @@ pub struct Store {
     client: VtaClient,
     context_id: String,
     purpose: String,
+    /// The key saves are signed with. A store without one can read but not
+    /// save: an unsigned save would be indistinguishable from a forged one.
+    signer: Option<Signer>,
+}
+
+/// What a listing found: the entries returned as memory, and the ones refused.
+#[derive(Debug, Default)]
+pub struct Listing {
+    /// Entries whose authorship checked out (or that predate signing).
+    pub entries: Vec<Entry>,
+    /// Entries that are not returned as memory, with why.
+    pub refused: Vec<Refused>,
+}
+
+/// What a recall found: ranked hits, and every entry in scope that was refused.
+#[derive(Debug, Default)]
+pub struct Recall {
+    /// The ranked matches, best first, at most the limit asked for.
+    pub hits: Vec<Hit>,
+    /// Entries in the recalled scope that were refused, whether or not they
+    /// would have matched — a refused record is worth knowing about either way.
+    pub refused: Vec<Refused>,
 }
 
 impl Store {
@@ -85,6 +117,39 @@ impl Store {
             client,
             context_id: context_id.into(),
             purpose: DEFAULT_PURPOSE.to_string(),
+            signer: None,
+        }
+    }
+
+    /// Sign every save with `signer`.
+    pub fn with_signer(mut self, signer: Signer) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    /// The key saves are signed with, if any.
+    pub fn signer(&self) -> Option<&Signer> {
+        self.signer.as_ref()
+    }
+
+    /// The DID this store signs as, to tell its own records apart.
+    fn own_did(&self) -> Option<&str> {
+        self.signer.as_ref().map(Signer::did)
+    }
+
+    /// Check one stored value found at `key`.
+    async fn check(&self, key: MemoryKey, value: &str) -> Result<Entry, Refused> {
+        let key_str = key.to_string();
+        match verify(value, &self.context_id, &key_str, self.own_did()).await {
+            Ok(authorship) => Ok(Entry {
+                record: MemoryRecord::decode(&key, value),
+                key,
+                authorship,
+            }),
+            Err(reason) => Err(Refused {
+                key: key_str,
+                reason,
+            }),
         }
     }
 
@@ -127,6 +192,10 @@ impl Store {
 
     /// Upsert one memory. A second save of the same `(type, name)` replaces it.
     ///
+    /// The stored value is `record` signed by this store's [`Signer`], naming it
+    /// as author and binding it to this context and key. Without a signer the
+    /// save is refused before anything is sent.
+    ///
     /// Unconditional (`put/0.3` without `expectedVersion`): a save is the user
     /// asking for this to be remembered now, whatever was there. Runs under
     /// [`VtaClient::idempotent`], which retries transient faults with one stable
@@ -135,7 +204,13 @@ impl Store {
     pub async fn save(&self, record: &MemoryRecord) -> anyhow::Result<MemoryKey> {
         let key = MemoryKey::new(record.kind, &record.name)?;
         let key_str = key.to_string();
-        let value = record.encode().context("encoding memory record")?;
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot save `{key}`: this memory store has no signing key, and memory records \
+                 are signed by their writer"
+            )
+        })?;
+        let value = signer.sign(record, &self.context_id, &key).await?;
 
         let resp = self
             .client
@@ -171,7 +246,7 @@ impl Store {
     }
 
     /// Every memory in the context, a page at a time.
-    pub async fn list(&self) -> anyhow::Result<Vec<Entry>> {
+    pub async fn list(&self) -> anyhow::Result<Listing> {
         self.list_of_type(None).await
     }
 
@@ -180,8 +255,8 @@ impl Store {
     ///
     /// Entries whose keys this tool did not write are skipped rather than
     /// erroring, so a context shared with another writer stays usable.
-    pub async fn list_of_type(&self, kind: Option<MemoryType>) -> anyhow::Result<Vec<Entry>> {
-        let mut entries = Vec::new();
+    pub async fn list_of_type(&self, kind: Option<MemoryType>) -> anyhow::Result<Listing> {
+        let mut listing = Listing::default();
         let mut cursor: Option<String> = None;
         loop {
             let mut query = Map::new();
@@ -209,13 +284,21 @@ impl Store {
                     self.context_id
                 )
             })?;
-            entries.extend(page);
+            for (key, value) in page {
+                match self.check(key, &value).await {
+                    Ok(entry) => listing.entries.push(entry),
+                    Err(refused) => {
+                        tracing::warn!(key = %refused.key, reason = %refused.reason, "refusing stored memory");
+                        listing.refused.push(refused);
+                    }
+                }
+            }
             match next {
                 Some(n) => cursor = Some(n),
                 None => break,
             }
         }
-        Ok(entries)
+        Ok(listing)
     }
 
     /// Ranked recall: list, optionally narrow by type, rank against `query`,
@@ -225,8 +308,8 @@ impl Store {
         query: &str,
         kind: Option<MemoryType>,
         limit: usize,
-    ) -> anyhow::Result<Vec<Hit>> {
-        let entries = self.list_of_type(kind).await?;
+    ) -> anyhow::Result<Recall> {
+        let Listing { entries, refused } = self.list_of_type(kind).await?;
         let mut hits = rank(entries, query);
         // A non-empty query that matched nothing should say so rather than
         // hand back the `limit` least-irrelevant memories in the context —
@@ -235,10 +318,13 @@ impl Store {
             hits.retain(|h| h.score > 0);
         }
         hits.truncate(limit);
-        Ok(hits)
+        Ok(Recall { hits, refused })
     }
 
     /// One memory by key, or `None` if absent — one `vta/memory/get/0.2`.
+    ///
+    /// A record that fails its authorship check is an error naming why, not
+    /// the record: it is not returned as memory.
     pub async fn get(&self, key: &MemoryKey) -> anyhow::Result<Option<Entry>> {
         let key_str = key.to_string();
         let resp = self
@@ -253,13 +339,20 @@ impl Store {
             })?;
         let got: get_spec::Response = serde_json::from_value(resp)
             .with_context(|| format!("decoding the response to reading `{key}`"))?;
-        Ok(got.items.into_iter().find_map(|item| {
+        let Some(value) = got.items.into_iter().find_map(|item| {
             let value = item.value.filter(|_| !item.deleted)?;
-            (item.key.as_str() == key_str).then(|| Entry {
-                key: key.clone(),
-                record: MemoryRecord::decode(key, value.as_str()),
-            })
-        }))
+            (item.key.as_str() == key_str).then_some(value)
+        }) else {
+            return Ok(None);
+        };
+        match self.check(key.clone(), value.as_str()).await {
+            Ok(entry) => Ok(Some(entry)),
+            Err(refused) => anyhow::bail!(
+                "memory `{key}` is stored but refused: {}. It is not returned as memory; \
+                 `memory_forget` removes it",
+                refused.reason
+            ),
+        }
     }
 
     /// Delete one memory. An absent key is an error, as it always has been.
@@ -332,9 +425,12 @@ pub fn purpose_refused(e: &VtaError, purpose: &str) -> Option<String> {
     ))
 }
 
-/// One `list/0.3` page: its live entries this tool can read, and the cursor
-/// for the next page.
-fn decode_page(resp: Value) -> anyhow::Result<(Vec<Entry>, Option<String>)> {
+/// One decoded `list/0.3` page: the live `(key, value)` pairs this tool can
+/// read, still to be checked, and the cursor for the next page.
+type Page = (Vec<(MemoryKey, String)>, Option<String>);
+
+/// Decode one `list/0.3` response into a [`Page`].
+fn decode_page(resp: Value) -> anyhow::Result<Page> {
     let page: list_spec::Response = serde_json::from_value(resp)?;
     let mut entries = Vec::with_capacity(page.items.len());
     for item in page.items {
@@ -356,8 +452,7 @@ fn decode_page(resp: Value) -> anyhow::Result<(Vec<Entry>, Option<String>)> {
             tracing::debug!(key = %item.key.as_str(), "skipping entry with an unrecognised key shape");
             continue;
         };
-        let record = MemoryRecord::decode(&key, value.as_str());
-        entries.push(Entry { key, record });
+        entries.push((key, value.as_str().to_string()));
     }
     Ok((entries, page.next_cursor))
 }
@@ -371,6 +466,7 @@ mod tests {
         Entry {
             key: MemoryKey::new(kind, name).unwrap(),
             record: MemoryRecord::new(kind, name, desc, "body", vec![]),
+            authorship: crate::authorship::Authorship::Unattributed,
         }
     }
 

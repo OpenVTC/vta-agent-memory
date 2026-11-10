@@ -211,6 +211,14 @@ context in key order and narrows by key prefix, but does not search. So:
 - Ranking is weighted token containment (name 4, description 2, body 1). Crude
   and predictable, chosen over embeddings because the VTA offers no vector index
   and a scoring function nobody can predict is worse than one everybody can.
+- Relevance is then weighted by **basis** — what kind of claim the memory is:
+  `declared` (the user said it) and evidenced `verified` count fully, `observed`
+  0.9, `unstated` (pre-provenance records) 0.8, `inferred` and evidence-less
+  `verified` 0.6. A nudge, not an override: a strong match on an inference still
+  beats a passing mention of a statement. `confidence` is shown but never ranked
+  on — two authors' estimates are not on one scale. The vocabulary (`basis`,
+  `confidence`, `evidence`) is the one Data Rooms publish, so a record moved
+  between memory and a room keeps its meaning.
 
 Cost is a full read of the context per recall. Fine at the hundreds of memories a
 person accumulates. If that stops being true, the fix is upstream — a
@@ -227,6 +235,20 @@ over 300, a body over 16 KiB, more than 32 links, or a link over 120 characters.
 in the context before the user has typed anything. The limits are checked where a
 record comes in, never on decode, so a memory stored before they existed — or by
 another tool — stays readable and forgettable.
+
+**Every memory names its author, and the VTA is not trusted to keep it honest.**
+A trust context can be granted to several DIDs — other devices, other agents —
+and the VTA stores whatever any of them puts. So each record is signed by the
+writer's own `did:key` (a Data Integrity proof, the same primitive Data Rooms put
+on a sealed record body), naming its `author` and the `(contextId, key)` it was
+written to. Every read checks it. A record that was edited after signing, copied
+to another key or context, or claims an author other than its signer is
+**refused**: it is not returned as memory, and recall, list and the session-start
+hook name it and say why. Records from before signing (v1) still read, marked
+`unattributed`; a v2 record with its signature stripped is refused rather than
+downgraded. Verification is `did:key`-only and does no network I/O, so a stored
+record cannot make recall fetch anything. `doctor` shows the DID this machine
+signs as.
 
 **Memory is not application state.** "Forget everything" has to stay a safe thing
 for a user to ask, which it stops being the moment account state lives here. The

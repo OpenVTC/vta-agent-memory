@@ -1,6 +1,6 @@
 [package]
 name = "vta-agent-memory"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.95.0"
 description = "Agentic memory for Claude Code, stored in a Verifiable Trust Agent"
@@ -35,6 +35,9 @@ vta-sdk = { version = "0.87", features = [
   # this client's DID and silently drops them. `vta-mcp` learned this the hard
   # way; the comment there is worth reading before removing it here.
   "acl-setup",
+  # Verifying the Data Integrity proof each memory record carries (#31):
+  # `trust_task_proof::verify_proof_set` with a `did:key`-only resolver.
+  "proof-verify",
 ] }
 
 # The ephemeral did:key -> ACL grant -> auto-rotate-on-first-connect flow that
@@ -70,3 +73,6 @@ vta-sdk = { version = "0.87", features = ["test-loopback"] }
 # Property tests for the fence sanitizer (`fence.rs`): "no output ever contains
 # a delimiter shape" is easier to state as a property than to enumerate.
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Minting a throwaway did:key to sign test records with. Already in the graph.
+ed25519-dalek = "3"
+multibase = "0.9"
