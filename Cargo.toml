@@ -70,17 +70,3 @@ vta-sdk = { version = "0.87", features = ["test-loopback"] }
 # Property tests for the fence sanitizer (`fence.rs`): "no output ever contains
 # a delimiter shape" is easier to state as a property than to enumerate.
 proptest = { version = "1", default-features = false, features = ["std"] }
-
-# TEMPORARY — remove before merge. vta-sdk 0.87 (the memory `*_for` methods,
-# VTI #2539) is in the open VTI Release PR #2527 and not yet on crates.io; this
-# builds against that Release PR's head until it publishes.
-[patch.crates-io]
-vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-secrets = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-specs = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-specs-core = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-specs-vta = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-specs-vtc = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-specs-rooms = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
-vti-specs-vtn = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
