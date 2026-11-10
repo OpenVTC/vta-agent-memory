@@ -986,3 +986,121 @@ async fn a_store_without_a_signer_refuses_to_save() {
     assert!(format!("{err:#}").contains("no signing key"), "{err:#}");
     assert!(vta.recorded().is_empty());
 }
+
+// ---- #32: epistemic provenance ---------------------------------------------
+
+/// Basis, confidence and evidence are stored inside the signed record and come
+/// back on recall and get.
+#[tokio::test]
+async fn provenance_round_trips_and_is_shown_on_recall_and_get() {
+    use vta_agent_memory::provenance::{Basis, Evidence};
+
+    let (store, vta) = store_with("proj");
+    let key = store
+        .save(
+            &record(
+                MemoryType::User,
+                "Short answers",
+                "prefers short answers",
+                "x",
+            )
+            .with_provenance(
+                Basis::Inferred,
+                Some(0.6),
+                vec![Evidence::Memory {
+                    key: "feedback/too-long".into(),
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+
+    let stored: Value = serde_json::from_str(&vta.value("proj", "user/short-answers")).unwrap();
+    assert_eq!(stored["basis"], "inferred");
+    assert_eq!(stored["confidence"], 0.6);
+    assert_eq!(
+        stored["evidence"],
+        json!([{ "kind": "memory", "key": "feedback/too-long" }])
+    );
+
+    let hit = &store.recall("short", None, 8).await.unwrap().hits[0];
+    let summary = hit.entry.summary();
+    assert_eq!(summary["basis"], "inferred");
+    assert_eq!(summary["confidence"], 0.6);
+    assert!(summary.get("evidence").is_none(), "citations come with get");
+    assert_eq!(summary["author"]["status"], "verified");
+
+    let full = store.get(&key).await.unwrap().unwrap().full();
+    assert_eq!(full["evidence"][0]["key"], "feedback/too-long");
+}
+
+/// The basis is signed with the record: upgrading an inference to a statement
+/// after the fact is tampering, and is refused.
+#[tokio::test]
+async fn upgrading_the_basis_after_signing_is_refused() {
+    use vta_agent_memory::provenance::Basis;
+
+    let (store, vta) = store_with("proj");
+    store
+        .save(
+            &record(
+                MemoryType::User,
+                "Prefers terse",
+                "prefers terse replies",
+                "x",
+            )
+            .with_provenance(Basis::Inferred, Some(0.3), vec![]),
+        )
+        .await
+        .unwrap();
+
+    let mut v: Value = serde_json::from_str(&vta.value("proj", "user/prefers-terse")).unwrap();
+    v["basis"] = json!("declared");
+    v.as_object_mut().unwrap().remove("confidence");
+    vta.plant("proj", "user/prefers-terse", v.to_string());
+
+    let recall = store.recall("terse", None, 8).await.unwrap();
+    assert!(recall.hits.is_empty());
+    assert_eq!(recall.refused.len(), 1);
+}
+
+/// On recall, a stated preference outranks an equally relevant inference —
+/// end to end, through signing and verification.
+#[tokio::test]
+async fn recall_prefers_what_the_user_said_over_what_was_inferred() {
+    use vta_agent_memory::provenance::Basis;
+
+    let (store, _vta) = store_with("proj");
+    store
+        .save(
+            &record(
+                MemoryType::User,
+                "Tabs guess",
+                "uses tabs for indentation",
+                "x",
+            )
+            .with_provenance(Basis::Inferred, Some(0.9), vec![]),
+        )
+        .await
+        .unwrap();
+    store
+        .save(
+            &record(
+                MemoryType::User,
+                "Tabs said",
+                "uses tabs for indentation",
+                "x",
+            )
+            .with_provenance(Basis::Declared, None, vec![]),
+        )
+        .await
+        .unwrap();
+
+    let hits = store
+        .recall("tabs indentation", None, 8)
+        .await
+        .unwrap()
+        .hits;
+    assert_eq!(hits[0].entry.record.name, "Tabs said");
+    assert_eq!(hits[1].entry.record.name, "Tabs guess");
+}

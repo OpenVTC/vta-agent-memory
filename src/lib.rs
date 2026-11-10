@@ -16,6 +16,7 @@ pub mod enrol;
 pub mod fence;
 pub mod lazy;
 pub mod pnm;
+pub mod provenance;
 pub mod record;
 pub mod server;
 pub mod setup;

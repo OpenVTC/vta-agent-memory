@@ -30,6 +30,7 @@ src/
   store.rs     typed ops over vta/memory/* — the only VTA-facing code
   record.rs    the record shape, key encoding, and recall ranking
   authorship.rs  signing records on save, verifying author + location on read
+  provenance.rs  basis / confidence / evidence: vocabulary, checks, rank weight
   server.rs    the six MCP tools
 tests/
   memory_roundtrip.rs        Store end-to-end against an in-process fake VTA
@@ -172,6 +173,10 @@ longer sends, returned the whole context with no prefix at all.) Everything in
   (`MemoryKey::raw_key_has_type` / `Store::list_of_type`).
 - Recall returns `summary()` (key, name, type, description), never `full()`.
   Bodies come from `memory_get` alone.
+- `rank()` multiplies relevance by `provenance::weight(basis)`. Never rank on
+  `confidence`: the rooms schema it comes from says a reader MUST NOT compare it
+  across authors. Keep `basis`/`evidence` as strings/raw values in the record —
+  a typed field would make a newer writer's record undecodable.
 - `rank()` is weighted token containment. Deliberately crude; see its doc
   comment before replacing it.
 

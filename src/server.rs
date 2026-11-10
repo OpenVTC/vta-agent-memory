@@ -22,6 +22,7 @@ use serde::Deserialize;
 
 use crate::fence::{Fence, Provenance};
 use crate::lazy::LazyStore;
+use crate::provenance::{Basis, Evidence};
 use crate::record::{MemoryKey, MemoryRecord, MemoryType};
 use crate::store::Store;
 
@@ -108,6 +109,21 @@ pub struct SaveParams {
     /// 120 characters.
     #[serde(default)]
     pub links: Vec<String>,
+    /// What kind of claim this is. `declared` only when the user stated it
+    /// themselves; `observed` for something you saw happen (a command that
+    /// failed, a file that exists); `verified` only when you can cite what it
+    /// was checked against in `evidence`; otherwise `inferred` — your own
+    /// conclusion about the user or the work. When unsure, `inferred`.
+    pub basis: String,
+    /// Optional, for `inferred` or `observed`: your estimate from 0 to 1 that
+    /// this is correct.
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    /// What this memory cites in support of itself — required for `verified`.
+    /// Each is an identifier, never fetched: a credential by id, another memory
+    /// by key, or a data-room record. At most 8.
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -192,6 +208,9 @@ impl MemoryMcp {
                        to external resources. Do NOT save what the repository already records — \
                        code structure, git history, past fixes — or anything that only matters to \
                        this conversation. Saving the same name twice replaces the earlier memory. \
+                       State the `basis` honestly: `declared` only for what the user said, \
+                       `inferred` for your own conclusions — inferred memories rank lower and are \
+                       shown as such in every later session. \
                        Refused if the name is over 120 characters, the description over 300, the \
                        body over 16 KiB, or there are more than 32 links or a link over 120 \
                        characters.",
@@ -206,7 +225,17 @@ impl MemoryMcp {
         Parameters(p): Parameters<SaveParams>,
     ) -> Result<CallToolResult, McpError> {
         let kind = parse_type(&p.kind)?;
-        let record = MemoryRecord::new(kind, &p.name, &p.description, &p.body, p.links);
+        let basis = Basis::parse(&p.basis).ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "unknown basis `{}`; expected declared, observed, verified or inferred",
+                    p.basis
+                ),
+                None,
+            )
+        })?;
+        let record = MemoryRecord::new(kind, &p.name, &p.description, &p.body, p.links)
+            .with_provenance(basis, p.confidence, p.evidence);
         // Before connecting: an oversized save is the caller's mistake, and
         // saying so must not depend on the VTA being reachable.
         record
@@ -698,7 +727,45 @@ mod tests {
             description: description.to_string(),
             body: body.to_string(),
             links,
+            basis: "declared".to_string(),
+            confidence: None,
+            evidence: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn provenance_is_checked_before_the_store() {
+        // As with the size limits: a malformed claim is the caller's mistake,
+        // and saying so must not depend on the VTA being reachable.
+        let mcp = unconfigured_server();
+        let with = |basis: &str, confidence: Option<f64>| SaveParams {
+            basis: basis.to_string(),
+            confidence,
+            ..save_params("n", "d", "b", vec![])
+        };
+        for (what, params) in [
+            ("unknown basis", with("hearsay", None)),
+            ("must cite", with("verified", None)),
+            ("between 0 and 1", with("inferred", Some(1.5))),
+        ] {
+            let err = mcp.memory_save(Parameters(params)).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{what}: {err:?}");
+            assert!(err.message.contains(what), "{what}: {}", err.message);
+        }
+    }
+
+    #[test]
+    fn the_save_schema_requires_a_basis() {
+        let schema = serde_json::to_value(schemars::schema_for!(SaveParams)).unwrap();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(required.contains(&"basis"), "{required:?}");
+        assert!(!required.contains(&"confidence"));
+        assert!(!required.contains(&"evidence"));
     }
 
     #[tokio::test]
