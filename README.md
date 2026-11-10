@@ -3,7 +3,7 @@
 Durable memory for Claude Code, stored in **your own Verifiable Trust Agent**
 rather than in the tool.
 
-Memories are ordinary `vta/memory/*` Trust Tasks (`put`, `delete` and `list` at 0.2, `get` at 0.1) against a
+Memories are ordinary `vta/memory/*` Trust Tasks (`put`, `delete` and `list` at 0.3, `get` at 0.2) against a
 VTA you control. They are scoped to one trust context, audited on the VTA, and
 included in its encrypted backups. Revoking this machine's access is one
 `pnm acl delete`.
@@ -71,7 +71,7 @@ This machine minted a temporary identity and needs it authorized.
 Run these wherever you hold VTA admin — it does not have to be this machine:
 
   pnm contexts create --id agent-memory --name agent-memory    # skip if it exists
-  pnm acl create --did did:key:z6Mkoqb… --role application --contexts agent-memory --label vta-agent-memory
+  pnm acl create --did did:key:z6Mkoqb… --role application --contexts agent-memory --purposes personalisation --label vta-agent-memory
 
 Then, back here:
 
@@ -150,7 +150,7 @@ Everything rides a flow the VTI stack already has:
 | Find its way in | `resolve_vta_endpoint` against the VTA's DID document |
 | Authorize it | `acl/create`, role `application`, scoped to one context |
 | Hold the key | the SDK session store (OS keyring), never this tool's config |
-| Prove it | a real `vta/memory/list/0.2` **as the rotated identity** |
+| Prove it | a real `vta/memory/list/0.3` **as the rotated identity** |
 
 `setup` additionally uses `pnm`'s config and keyring session to find the VTA and
 make the grant without a second person.
@@ -199,7 +199,7 @@ one you ended up on.
 
 ## Design notes worth knowing
 
-**Retrieval happens on this side of the wire.** `memory/list/0.2` pages a
+**Retrieval happens on this side of the wire.** `memory/list/0.3` pages a
 context in key order and narrows by key prefix, but does not search. So:
 
 - Keys are structured `<type>/<slug>`, which lets a type filter run on the raw
@@ -271,6 +271,26 @@ key lives in the session store — only which session to open:
   "recallLimit": 8
 }
 ```
+
+### Purpose of use
+
+Every memory operation names the purpose the assistant will use what it reads
+for, and the VTA holds it to the purposes the agent's access entry grants and
+records it with the read (VTI-ACL-100 – 110). The default is
+`personalisation`: adapting the assistant's help to you — preferences, context
+carried between sessions — which is what recalling your memories is for.
+`setup` and `init` grant exactly that purpose, rather than `any`.
+
+To name another, set `"purpose"` in the config (or `$VTA_AGENT_MEMORY_PURPOSE`
+for one process). It must be one the entry grants; a purpose it does not grant
+is refused before anything is read or written, and the error names the fix:
+
+```bash
+pnm acl update <agent DID> --purposes personalisation,taskExecution
+```
+
+An entry created before this release grants `any`, under which
+`personalisation` is served without a change.
 
 ## When the VTA is unreachable
 

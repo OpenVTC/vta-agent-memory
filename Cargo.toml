@@ -23,7 +23,7 @@ path = "src/main.rs"
 # already drive `vta/memory/*` through the generic Trust-Task dispatcher, which
 # picks TSP > DIDComm > REST from what both DID documents advertise. Nothing
 # here is transport-aware.
-vta-sdk = { version = "0.86", features = [
+vta-sdk = { version = "0.87", features = [
   "client",
   "session",
   "didcomm",
@@ -40,7 +40,7 @@ vta-sdk = { version = "0.86", features = [
 # The ephemeral did:key -> ACL grant -> auto-rotate-on-first-connect flow that
 # the mediator, PNM and did-hosting already share. `onboarding` pulls only
 # vta-sdk's session machinery, which is already here.
-vti-secrets = { version = "0.35", default-features = false, features = ["onboarding"] }
+vti-secrets = { version = "0.36", default-features = false, features = ["onboarding"] }
 
 rmcp = { version = "3", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
@@ -66,7 +66,21 @@ tempfile = "3"
 # `test-loopback` answers the Trust-Task surface in-process, so the integration
 # tests exercise the real payloads `memory_{put,list,delete}` build without a
 # VTA, a mediator, or a socket. Additive and zero-cost outside tests.
-vta-sdk = { version = "0.86", features = ["test-loopback"] }
+vta-sdk = { version = "0.87", features = ["test-loopback"] }
 # Property tests for the fence sanitizer (`fence.rs`): "no output ever contains
 # a delimiter shape" is easier to state as a property than to enumerate.
 proptest = { version = "1", default-features = false, features = ["std"] }
+
+# TEMPORARY — remove before merge. vta-sdk 0.87 (the memory `*_for` methods,
+# VTI #2539) is in the open VTI Release PR #2527 and not yet on crates.io; this
+# builds against that Release PR's head until it publishes.
+[patch.crates-io]
+vta-sdk = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-secrets = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-common = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-specs = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-specs-core = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-specs-vta = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-specs-vtc = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-specs-rooms = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }
+vti-specs-vtn = { git = "https://github.com/OpenVTC/verifiable-trust-infrastructure", rev = "878c60b1280d9fd81f84032f0f397d7f0fdca6c6" }

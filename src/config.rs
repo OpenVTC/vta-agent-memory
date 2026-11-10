@@ -147,13 +147,33 @@ pub struct Config {
     /// session worse, not better.
     #[serde(default = "default_recall_limit")]
     pub recall_limit: usize,
+    /// The purpose every memory operation names (VTI-ACL-103): what the
+    /// assistant will use what it reads for. Absent means
+    /// [`crate::store::DEFAULT_PURPOSE`]; [`PURPOSE_ENV`] overrides either.
+    /// Must be one the agent's access entry grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
+
+/// Overrides the configured purpose for this process.
+pub const PURPOSE_ENV: &str = "VTA_AGENT_MEMORY_PURPOSE";
 
 fn default_recall_limit() -> usize {
     8
 }
 
 impl Config {
+    /// The purpose memory operations name: [`PURPOSE_ENV`], else the config's
+    /// `purpose`, else [`crate::store::DEFAULT_PURPOSE`].
+    pub fn purpose(&self) -> String {
+        std::env::var(PURPOSE_ENV)
+            .ok()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .or_else(|| self.purpose.clone())
+            .unwrap_or_else(|| crate::store::DEFAULT_PURPOSE.to_string())
+    }
+
     /// `$VTA_AGENT_MEMORY_CONFIG`, else `~/.config/vta-agent-memory/config.json`.
     pub fn default_path() -> anyhow::Result<PathBuf> {
         if let Ok(p) = std::env::var("VTA_AGENT_MEMORY_CONFIG")
@@ -222,6 +242,7 @@ mod tests {
                 operator_login: false,
             },
             recall_limit: 8,
+            purpose: None,
         }
     }
 

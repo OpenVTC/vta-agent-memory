@@ -171,9 +171,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-did-resolver-cache-sdk"
-version = "0.8.47"
+version = "0.8.48"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c970818b038d29d55daab6ab6beee97ca1460d309ab473287624e17073d010c"
+checksum = "309263b0a2e3b3cb3b39ffbed6fac57407f9e1da3c41b61b1f6e9e74d4eddb0c"
 dependencies = [
  "affinidi-did-common",
  "affinidi-did-resolver-traits",
@@ -230,9 +230,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-did-webs"
-version = "0.9.2"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0f83efd1ed6ab569a4fdfdf8f37438e074e0d7e1414c9459b1689400c89d05"
+checksum = "3cffcf5a4d5a41858a27cd313a3dec236d25711dd9a60e3e145ff02cb4588998"
 dependencies = [
  "affinidi-cesr",
  "affinidi-crypto",
@@ -264,9 +264,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-keri-core"
-version = "0.5.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f44114f2dd34555182b83331291ac10d8a727f515b0622037a8e4e1c87429be2"
+checksum = "40c60668538424e958a9b91dcbbe8ea53f0e704963211f7b28eb5dd94dd971a5"
 dependencies = [
  "affinidi-cesr",
  "affinidi-keri-crypto",
@@ -282,9 +282,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-keri-crypto"
-version = "0.5.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "122a93049f2c5c4da2402fc2cad211686049258b936c1c87969f3ca7c0ef9cd4"
+checksum = "27a4ad8f8e2d226b94ada483f508beef993c9eecd1f334b4f47e3e93e5b21e20"
 dependencies = [
  "affinidi-cesr",
  "argon2 0.5.3",
@@ -5460,9 +5460,8 @@ dependencies = [
 
 [[package]]
 name = "vta-sdk"
-version = "0.86.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ce818f9e96a5ab1049d5e53920cf6ba0facea44bd5c056fc5e4efb84de3ba77"
+version = "0.87.0"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -5513,9 +5512,8 @@ dependencies = [
 
 [[package]]
 name = "vti-common"
-version = "0.62.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81cb002cea4123b6c74be8a6797e3515b7d61cf094096f924af5f9990b4e2426"
+version = "0.63.0"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "affinidi-data-integrity",
  "affinidi-did-resolver-cache-sdk",
@@ -5559,9 +5557,8 @@ dependencies = [
 
 [[package]]
 name = "vti-secrets"
-version = "0.35.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9620602423ef8ac523ff1f8551e22c4c5ecf62a0ffeeaa1f1ae54a6792475d2"
+version = "0.36.0"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "aes-gcm",
  "argon2 0.6.0",
@@ -5581,9 +5578,8 @@ dependencies = [
 
 [[package]]
 name = "vti-specs"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f79f062128a66e7b202deeb7ea19b6a3f50391c5ae061c18c24337535b525aac"
+version = "0.12.0"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "trust-tasks-rs",
  "vti-specs-core",
@@ -5595,9 +5591,8 @@ dependencies = [
 
 [[package]]
 name = "vti-specs-core"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c853af749e63e58de72fbd074b694b48aab9612582f9373755879815c7ce9e3b"
+version = "0.5.0"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "trust-tasks-build",
  "trust-tasks-rs",
@@ -5605,9 +5600,8 @@ dependencies = [
 
 [[package]]
 name = "vti-specs-rooms"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a46ec7ed6663f4f9c82b2b1b9e9abac6f780740e05c84bcf2476a05a2054e5d"
+version = "0.7.1"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "trust-tasks-build",
  "trust-tasks-rs",
@@ -5615,9 +5609,8 @@ dependencies = [
 
 [[package]]
 name = "vti-specs-vta"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81ca2055130dd32e6779d0c81c52cb58a497fc1abec9763f213f7851add18154"
+version = "0.8.0"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "trust-tasks-build",
  "trust-tasks-rs",
@@ -5626,8 +5619,7 @@ dependencies = [
 [[package]]
 name = "vti-specs-vtc"
 version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58e97b4b3579e82664b6a65d13188c1874f732b5be403f3736e7da1f26d1d248"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "trust-tasks-build",
  "trust-tasks-rs",
@@ -5636,8 +5628,7 @@ dependencies = [
 [[package]]
 name = "vti-specs-vtn"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddb9ba0c0a4ac69c3b809c1c63b6c2e368dd2d66666778374fd9b16ad55d35d5"
+source = "git+https://github.com/OpenVTC/verifiable-trust-infrastructure?rev=878c60b1280d9fd81f84032f0f397d7f0fdca6c6#878c60b1280d9fd81f84032f0f397d7f0fdca6c6"
 dependencies = [
  "trust-tasks-build",
  "trust-tasks-rs",

@@ -107,8 +107,11 @@ impl PendingEnrolment {
                 ctx = self.context_id
             ),
             format!(
-                "pnm acl create --did {} --role {AGENT_ROLE} --contexts {} --label vta-agent-memory",
-                self.ephemeral_did, self.context_id
+                "pnm acl create --did {} --role {AGENT_ROLE} --contexts {} --purposes {} \
+                 --label vta-agent-memory",
+                self.ephemeral_did,
+                self.context_id,
+                crate::store::DEFAULT_PURPOSE
             ),
         ]
     }
@@ -227,7 +230,7 @@ pub struct ConnectArgs {
 /// Authenticate with the granted identity, **rotate off it**, prove the result
 /// reaches the context, and keep it.
 ///
-/// The proof is a real `vta/memory/list/0.2`, not a cheaper `whoami`: listing is
+/// The proof is a real `vta/memory/list/0.3`, not a cheaper `whoami`: listing is
 /// the operation gated on exactly what the grant was supposed to arrange, and a
 /// `whoami` that succeeds tells you the key authenticates and nothing about
 /// whether it can reach the memories.
@@ -265,6 +268,7 @@ pub async fn connect(args: ConnectArgs) -> anyhow::Result<SetupOutcome> {
             operator_login: false,
         },
         recall_limit: args.recall_limit,
+        purpose: None,
     };
 
     // Verify over the connection just made, then close it — a DIDComm client
@@ -341,7 +345,7 @@ mod tests {
         assert_eq!(
             cmds[1],
             "pnm acl create --did did:key:z6MkTemp --role application \
-             --contexts agent-memory --label vta-agent-memory"
+             --contexts agent-memory --purposes personalisation --label vta-agent-memory"
         );
     }
 

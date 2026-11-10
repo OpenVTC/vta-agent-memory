@@ -6,13 +6,16 @@
 //! `VtaClient` memory method bodies — the same payload-building code that
 //! ships — and hand what they emit to [`FakeMemoryKeyspace`], which implements
 //! the storage semantics the VTA's own `operations::memory` does at
-//! `vta/memory/*/0.2` and `get/0.1`:
+//! `vta/memory/*/0.3` and `get/0.2`:
 //!
 //! - `put` upserts on `(contextId, key)` and takes the context's next version.
 //! - `list` returns the context's live items in ascending key order, narrowed
 //!   by `prefix`, and never another context's.
 //! - `get` answers each key in `items` or `missing`.
 //! - `delete` leaves nothing live and answers `existed`.
+//! - every operation names a `purpose`, held to the purposes granted (`any`
+//!   unless a test lists some), and a purpose not granted is
+//!   `vta/memory/<op>:purposeNotGranted` before anything is read or written.
 //!
 //! What this cannot cover is framing — TSP sealing, DIDComm authcrypt, mediator
 //! routing all sit below the loopback point. It covers the layer where the
@@ -41,6 +44,8 @@ struct FakeMemoryKeyspace {
     /// Every `(type_uri, payload)` dispatched, so a test can assert on the wire
     /// shape as well as the outcome.
     seen: Mutex<Vec<(String, Value)>>,
+    /// The purposes the caller's entry lists; `None` is `any`.
+    granted: Mutex<Option<Vec<String>>>,
 }
 
 impl FakeMemoryKeyspace {
@@ -76,9 +81,24 @@ impl LoopbackSink for FakeMemoryKeyspace {
             .push((type_uri.to_string(), payload.clone()));
 
         let context_id = field(payload, "contextId")?;
+        if let Some(granted) = self.granted.lock().unwrap().as_ref() {
+            let purpose = payload.get("purpose").and_then(Value::as_str);
+            let ok = match purpose {
+                Some(p) => granted.iter().any(|g| g == p),
+                None => granted.len() == 1,
+            };
+            if !ok {
+                let op = type_uri.rsplit('/').nth(1).unwrap_or_default().to_string();
+                return Err(VtaError::Rejected {
+                    code: format!("vta/memory/{op}:purposeNotGranted"),
+                    message: "this entry does not grant the purpose".into(),
+                    details: Some(json!({ "purposeNamed": purpose.is_some(), "purpose": purpose })),
+                });
+            }
+        }
 
         match type_uri {
-            u if u.ends_with("/vta/memory/put/0.2") => {
+            u if u.ends_with("/vta/memory/put/0.3") => {
                 let key = field(payload, "key")?;
                 let value = field(payload, "value")?;
                 let mut counter = self.counter.lock().unwrap();
@@ -98,7 +118,7 @@ impl LoopbackSink for FakeMemoryKeyspace {
                     "valueBytes": value.len(),
                 }))
             }
-            u if u.ends_with("/vta/memory/list/0.2") => {
+            u if u.ends_with("/vta/memory/list/0.3") => {
                 let prefix = payload.get("prefix").and_then(Value::as_str).unwrap_or("");
                 let items: Vec<Value> = self
                     .entries
@@ -110,7 +130,7 @@ impl LoopbackSink for FakeMemoryKeyspace {
                     .collect();
                 Ok(json!({ "items": items, "highWatermark": *self.counter.lock().unwrap() }))
             }
-            u if u.ends_with("/vta/memory/get/0.1") => {
+            u if u.ends_with("/vta/memory/get/0.2") => {
                 let entries = self.entries.lock().unwrap();
                 let (mut items, mut missing) = (Vec::new(), Vec::new());
                 for k in payload["keys"].as_array().into_iter().flatten() {
@@ -122,7 +142,7 @@ impl LoopbackSink for FakeMemoryKeyspace {
                 }
                 Ok(json!({ "items": items, "missing": missing }))
             }
-            u if u.ends_with("/vta/memory/delete/0.2") => {
+            u if u.ends_with("/vta/memory/delete/0.3") => {
                 let key = field(payload, "key")?;
                 let existed = self
                     .entries
@@ -372,7 +392,7 @@ async fn the_payloads_on_the_wire_are_camel_case_and_context_scoped() {
 
     let seen = vta.recorded();
     let (put_uri, put) = &seen[0];
-    assert!(put_uri.ends_with("/vta/memory/put/0.2"), "{put_uri}");
+    assert!(put_uri.ends_with("/vta/memory/put/0.3"), "{put_uri}");
     assert_eq!(put.get("contextId").unwrap(), "proj");
     assert_eq!(put.get("key").unwrap(), "user/name");
     assert!(
@@ -388,7 +408,7 @@ async fn the_payloads_on_the_wire_are_camel_case_and_context_scoped() {
     assert!(!stored.updated_at.is_empty(), "every write is stamped");
 
     let (del_uri, del) = &seen[seen.len() - 1];
-    assert!(del_uri.ends_with("/vta/memory/delete/0.2"), "{del_uri}");
+    assert!(del_uri.ends_with("/vta/memory/delete/0.3"), "{del_uri}");
     assert_eq!(del.get("key").unwrap(), "user/name");
 }
 
@@ -426,7 +446,7 @@ async fn a_re_cased_list_response_is_an_error_not_an_empty_context() {
     );
     let err = store.list().await.unwrap_err();
     assert!(
-        format!("{err:#}").contains("vta/memory/list/0.2"),
+        format!("{err:#}").contains("vta/memory/list/0.3"),
         "the error should name the task whose shape was violated: {err:#}"
     );
 }
@@ -574,4 +594,60 @@ async fn a_rendered_recall_has_exactly_one_pair_of_delimiters() {
         1,
         "exactly one closing delimiter — content cannot add another"
     );
+}
+
+/// Every operation names the store's purpose — `personalisation` unless the
+/// config names another — so the VTA can hold it to the caller's entry and
+/// record it with the read (VTI-ACL-103, VTI-ACL-106).
+#[tokio::test]
+async fn every_operation_names_its_purpose() {
+    let (store, vta) = store_with("proj");
+    assert_eq!(store.purpose(), vta_agent_memory::store::DEFAULT_PURPOSE);
+    let key = store
+        .save(&record(MemoryType::User, "Name", "desc", "body"))
+        .await
+        .unwrap();
+    store.recall("name", None, 8).await.unwrap();
+    store.get(&key).await.unwrap().expect("present");
+    store.forget(&key).await.unwrap();
+
+    let seen = vta.recorded();
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    for (uri, payload) in &seen {
+        assert_eq!(payload["purpose"], "personalisation", "{uri}: {payload}");
+    }
+}
+
+/// A purpose the caller's entry does not grant is refused before anything is
+/// read or written, and the error names the `pnm` command that grants it.
+#[tokio::test]
+async fn a_purpose_not_granted_names_the_grant_that_fixes_it() {
+    let vta = Arc::new(FakeMemoryKeyspace::default());
+    *vta.granted.lock().unwrap() = Some(vec!["taskExecution".into()]);
+    let store = Store::new(VtaClient::loopback(vta.clone()), "proj");
+
+    let err = store
+        .save(&record(MemoryType::User, "Name", "desc", "body"))
+        .await
+        .unwrap_err();
+    let why = format!("{err:#}");
+    assert!(
+        why.contains("does not grant the purpose `personalisation`"),
+        "{why}"
+    );
+    assert!(
+        why.contains("pnm acl update <this agent's DID> --purposes personalisation"),
+        "{why}"
+    );
+    assert_eq!(vta.len(), 0, "nothing was written");
+    let why = format!("{:#}", store.recall("", None, 8).await.unwrap_err());
+    assert!(why.contains("--purposes personalisation"), "{why}");
+
+    // Named as the entry grants it, the same store works.
+    let store = Store::new(VtaClient::loopback(vta.clone()), "proj").with_purpose("taskExecution");
+    store
+        .save(&record(MemoryType::User, "Name", "desc", "body"))
+        .await
+        .unwrap();
+    assert_eq!(store.recall("name", None, 8).await.unwrap().len(), 1);
 }

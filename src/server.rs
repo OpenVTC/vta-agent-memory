@@ -482,8 +482,8 @@ mod tests {
     }
 
     /// Just enough of the VTA's memory keyspace for the read tools:
-    /// `list/0.2` returns the live items under `prefix`, in key order, and
-    /// `get/0.1` answers each named key.
+    /// `list/0.3` returns the live items under `prefix`, in key order, and
+    /// `get/0.2` answers each named key.
     #[derive(Default)]
     struct Keyspace(Mutex<BTreeMap<String, String>>);
 
@@ -497,7 +497,7 @@ mod tests {
     impl LoopbackSink for Keyspace {
         fn dispatch(&self, type_uri: &str, payload: &Value) -> Result<Value, VtaError> {
             let entries = self.0.lock().unwrap();
-            if type_uri.ends_with("/vta/memory/list/0.2") {
+            if type_uri.ends_with("/vta/memory/list/0.3") {
                 let prefix = payload.get("prefix").and_then(Value::as_str).unwrap_or("");
                 let items: Vec<Value> = entries
                     .iter()
@@ -506,7 +506,7 @@ mod tests {
                     .collect();
                 return Ok(json!({ "items": items, "highWatermark": 1 }));
             }
-            if type_uri.ends_with("/vta/memory/get/0.1") {
+            if type_uri.ends_with("/vta/memory/get/0.2") {
                 let (mut items, mut missing) = (Vec::new(), Vec::new());
                 for k in payload["keys"].as_array().into_iter().flatten() {
                     let k = k.as_str().unwrap_or_default();
