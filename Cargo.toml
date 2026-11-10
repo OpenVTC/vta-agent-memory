@@ -23,7 +23,7 @@ path = "src/main.rs"
 # already drive `vta/memory/*` through the generic Trust-Task dispatcher, which
 # picks TSP > DIDComm > REST from what both DID documents advertise. Nothing
 # here is transport-aware.
-vta-sdk = { version = "0.86", features = [
+vta-sdk = { version = "0.87", features = [
   "client",
   "session",
   "didcomm",
@@ -40,7 +40,7 @@ vta-sdk = { version = "0.86", features = [
 # The ephemeral did:key -> ACL grant -> auto-rotate-on-first-connect flow that
 # the mediator, PNM and did-hosting already share. `onboarding` pulls only
 # vta-sdk's session machinery, which is already here.
-vti-secrets = { version = "0.35", default-features = false, features = ["onboarding"] }
+vti-secrets = { version = "0.36", default-features = false, features = ["onboarding"] }
 
 rmcp = { version = "3", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
@@ -66,7 +66,7 @@ tempfile = "3"
 # `test-loopback` answers the Trust-Task surface in-process, so the integration
 # tests exercise the real payloads `memory_{put,list,delete}` build without a
 # VTA, a mediator, or a socket. Additive and zero-cost outside tests.
-vta-sdk = { version = "0.86", features = ["test-loopback"] }
+vta-sdk = { version = "0.87", features = ["test-loopback"] }
 # Property tests for the fence sanitizer (`fence.rs`): "no output ever contains
 # a delimiter shape" is easier to state as a property than to enumerate.
 proptest = { version = "1", default-features = false, features = ["std"] }

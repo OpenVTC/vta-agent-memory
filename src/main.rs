@@ -258,7 +258,7 @@ async fn open(config_path: &std::path::Path) -> anyhow::Result<(Config, Store)> 
     cfg.identity
         .ensure_permitted(operator_login_allowed_by_env())?;
     let client = cfg.to_agent_connect().connect().await?;
-    let store = Store::new(client, cfg.context_id.clone());
+    let store = Store::new(client, cfg.context_id.clone()).with_purpose(cfg.purpose());
     Ok((cfg, store))
 }
 
@@ -393,7 +393,7 @@ async fn doctor(config_path: &std::path::Path) -> anyhow::Result<()> {
     let client = cfg.to_agent_connect().connect().await?;
     println!("transport   {:?}", client.trust_task_transport());
 
-    let store = Store::new(client, cfg.context_id.clone());
+    let store = Store::new(client, cfg.context_id.clone()).with_purpose(cfg.purpose());
     let result = store.list().await;
     match finish(store, result).await {
         Ok(entries) => {

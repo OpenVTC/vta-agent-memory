@@ -10,7 +10,7 @@
 //! | Mint the agent identity | `vta_sdk::provision_client::setup_key::EphemeralSetupKey` |
 //! | Authorize it | `acl/create` with role `application`, scoped to one context |
 //! | Find the agent's way back in | `vta_sdk::session::resolve_vta_endpoint` |
-//! | Prove it works | a real `vta/memory/list/0.2` as the new identity |
+//! | Prove it works | a real `vta/memory/list/0.3` as the new identity |
 //!
 //! **Online only.** There is no offline/air-gapped path: setup requires a
 //! reachable VTA, because the last step is the one that matters — connecting as
@@ -160,6 +160,7 @@ async fn setup_body(
         context_id: context_id.clone(),
         identity,
         recall_limit: 8,
+        purpose: None,
     };
     let memories_found = verify(&cfg).await?;
 
@@ -271,6 +272,10 @@ async fn onboard_dedicated_agent(
             // Not a hand-off entry (VTI-ACL-054): the agent identity rolls over
             // through `IntegrationOnboarding`, not through this flag.
             handoff: false,
+            // A grant to a software agent lists what its task needs rather than
+            // `any` (VTI-VTA-044): the one purpose every memory operation names.
+            purposes: vta_sdk::acl::PurposeScope::listed([crate::store::DEFAULT_PURPOSE])
+                .map_err(|e| anyhow::anyhow!("the agent's purposes: {e}"))?,
         })
         .await
         .with_context(|| {
@@ -373,7 +378,7 @@ pub async fn discover_didcomm_endpoint(
 
 /// Connect as the configured identity and list memories.
 ///
-/// The probe is `memory/list/0.2` and not a cheaper `whoami`, because listing
+/// The probe is `memory/list/0.3` and not a cheaper `whoami`, because listing
 /// is the operation gated on exactly what setup just arranged: access to the
 /// chosen context. A successful `whoami` proves the key authenticates and
 /// nothing about whether it can reach the memories.

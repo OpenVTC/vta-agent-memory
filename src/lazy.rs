@@ -103,6 +103,7 @@ impl LazyStore {
             .get_or_try_init(|| async {
                 let cfg = self.usable_config().await?.clone();
                 let context_id = cfg.context_id.clone();
+                let purpose = cfg.purpose();
 
                 // The connect future is **not `Send`**: the session rung goes
                 // through `SessionStore::connect_with_transport`, which returns
@@ -123,7 +124,7 @@ impl LazyStore {
                 .await
                 .map_err(|e| anyhow::anyhow!("the VTA connection task failed: {e}"))??;
 
-                Ok::<_, anyhow::Error>(Store::new(client, context_id))
+                Ok::<_, anyhow::Error>(Store::new(client, context_id).with_purpose(purpose))
             })
             .await
     }

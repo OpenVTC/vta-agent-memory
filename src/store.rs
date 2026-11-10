@@ -1,5 +1,6 @@
 //! The memory store: typed operations over the VTA's `vta/memory/*` Trust
-//! Tasks, at 0.2 (`put`, `delete`, `list`) and `get/0.1`.
+//! Tasks, at 0.3 (`put`, `delete`, `list`) and `get/0.2` — the versions that
+//! carry `purpose`.
 //!
 //! Every method here is one Trust Task (or one paged sequence of them) plus
 //! record encoding. There is no transport code, no hand-rolled retry, and no
@@ -20,6 +21,17 @@
 //!   never happened.
 //! - **Caching** would have to answer "stale by how long?" for a store the user
 //!   can also write from `pnm`. Every read is a round trip.
+//!
+//! ## Every read names its purpose
+//!
+//! The VTA holds every read of memory to the purposes the caller's ACL entry
+//! grants, and records the purpose with the read (VTI-ACL-100 – 110). This
+//! store names one on every call: [`DEFAULT_PURPOSE`], `personalisation` —
+//! "adapt what it does for the principal to the principal: tone, preferences,
+//! context carried between sessions", which is what an assistant recalling
+//! the user's memories is doing — unless the config names another. A purpose
+//! the entry does not grant is refused before anything is read or written, and
+//! [`purpose_refused`] turns that refusal into the `pnm` command that grants it.
 //!
 //! ## Responses are decoded into the published types
 //!
@@ -44,28 +56,55 @@
 use anyhow::Context as _;
 use serde_json::{Map, Value, json};
 use vta_sdk::client::VtaClient;
+use vta_sdk::error::VtaError;
 use vta_sdk::specs::vta::memory::{
-    delete::v0_2 as delete_spec, get::v0_1 as get_spec, list::v0_2 as list_spec,
-    put::v0_2 as put_spec,
+    delete::v0_3 as delete_spec, get::v0_2 as get_spec, list::v0_3 as list_spec,
+    put::v0_3 as put_spec,
 };
 
 use crate::record::{Entry, Hit, MemoryKey, MemoryRecord, MemoryType, rank};
 
-/// Items per `list/0.2` page.
+/// Items per `list/0.3` page.
 const PAGE: u64 = 500;
+
+/// The purpose every memory operation names unless the config names another:
+/// an assistant recalling the user's memories adapts what it does to them.
+pub const DEFAULT_PURPOSE: &str = "personalisation";
 
 /// A memory store bound to one VTA client and one trust context.
 pub struct Store {
     client: VtaClient,
     context_id: String,
+    purpose: String,
 }
 
 impl Store {
-    /// Bind a connected client to a context.
+    /// Bind a connected client to a context, reading for [`DEFAULT_PURPOSE`].
     pub fn new(client: VtaClient, context_id: impl Into<String>) -> Self {
         Self {
             client,
             context_id: context_id.into(),
+            purpose: DEFAULT_PURPOSE.to_string(),
+        }
+    }
+
+    /// Name `purpose` on every operation instead of [`DEFAULT_PURPOSE`].
+    pub fn with_purpose(mut self, purpose: impl Into<String>) -> Self {
+        self.purpose = purpose.into();
+        self
+    }
+
+    /// The purpose every operation names.
+    pub fn purpose(&self) -> &str {
+        &self.purpose
+    }
+
+    /// The error for a failed call: a `purposeNotGranted` refusal becomes the
+    /// command that fixes it, anything else keeps `doing` as its context.
+    fn failed(&self, e: VtaError, doing: String) -> anyhow::Error {
+        match purpose_refused(&e, &self.purpose) {
+            Some(why) => anyhow::anyhow!(why),
+            None => anyhow::Error::new(e).context(doing),
         }
     }
 
@@ -88,7 +127,7 @@ impl Store {
 
     /// Upsert one memory. A second save of the same `(type, name)` replaces it.
     ///
-    /// Unconditional (`put/0.2` without `expectedVersion`): a save is the user
+    /// Unconditional (`put/0.3` without `expectedVersion`): a save is the user
     /// asking for this to be remembered now, whatever was there. Runs under
     /// [`VtaClient::idempotent`], which retries transient faults with one stable
     /// idempotency key, so a websocket blip mid-session neither loses the save
@@ -101,11 +140,21 @@ impl Store {
         let resp = self
             .client
             .idempotent(|| {
-                self.client
-                    .memory_put_versioned(&self.context_id, &key_str, &value, None)
+                self.client.memory_put_versioned_for(
+                    &self.context_id,
+                    &key_str,
+                    &value,
+                    None,
+                    Some(&self.purpose),
+                )
             })
             .await
-            .with_context(|| format!("saving memory `{key}` in context `{}`", self.context_id))?;
+            .map_err(|e| {
+                self.failed(
+                    e,
+                    format!("saving memory `{key}` in context `{}`", self.context_id),
+                )
+            })?;
 
         let decoded: put_spec::Response = serde_json::from_value(resp)
             .with_context(|| format!("decoding the response to saving `{key}`"))?;
@@ -145,13 +194,18 @@ impl Store {
             }
             let resp = self
                 .client
-                .memory_list_page(&self.context_id, query)
+                .memory_list_page_for(&self.context_id, query, Some(&self.purpose))
                 .await
-                .with_context(|| format!("listing memories in context `{}`", self.context_id))?;
+                .map_err(|e| {
+                    self.failed(
+                        e,
+                        format!("listing memories in context `{}`", self.context_id),
+                    )
+                })?;
             let (page, next) = decode_page(resp).with_context(|| {
                 format!(
                     "decoding the memory list for context `{}` — the VTA's response did not \
-                     match vta/memory/list/0.2",
+                     match vta/memory/list/0.3",
                     self.context_id
                 )
             })?;
@@ -184,14 +238,19 @@ impl Store {
         Ok(hits)
     }
 
-    /// One memory by key, or `None` if absent — one `vta/memory/get/0.1`.
+    /// One memory by key, or `None` if absent — one `vta/memory/get/0.2`.
     pub async fn get(&self, key: &MemoryKey) -> anyhow::Result<Option<Entry>> {
         let key_str = key.to_string();
         let resp = self
             .client
-            .memory_get(&self.context_id, &[key_str.as_str()])
+            .memory_get_for(&self.context_id, &[key_str.as_str()], Some(&self.purpose))
             .await
-            .with_context(|| format!("reading memory `{key}` in context `{}`", self.context_id))?;
+            .map_err(|e| {
+                self.failed(
+                    e,
+                    format!("reading memory `{key}` in context `{}`", self.context_id),
+                )
+            })?;
         let got: get_spec::Response = serde_json::from_value(resp)
             .with_context(|| format!("decoding the response to reading `{key}`"))?;
         Ok(got.items.into_iter().find_map(|item| {
@@ -205,7 +264,7 @@ impl Store {
 
     /// Delete one memory. An absent key is an error, as it always has been.
     ///
-    /// `delete/0.2` leaves a tombstone, so the user's other devices learn of the
+    /// `delete/0.3` leaves a tombstone, so the user's other devices learn of the
     /// deletion, and answers a key holding nothing with `existed: false` rather
     /// than an error. This store keeps refusing that case: "forget X" for an X
     /// that is not there is more likely a mistyped name than a success. Under
@@ -217,12 +276,19 @@ impl Store {
         let resp = self
             .client
             .idempotent(|| {
-                self.client
-                    .memory_delete_versioned(&self.context_id, &key_str, None)
+                self.client.memory_delete_versioned_for(
+                    &self.context_id,
+                    &key_str,
+                    None,
+                    Some(&self.purpose),
+                )
             })
             .await
-            .with_context(|| {
-                format!("forgetting memory `{key}` in context `{}`", self.context_id)
+            .map_err(|e| {
+                self.failed(
+                    e,
+                    format!("forgetting memory `{key}` in context `{}`", self.context_id),
+                )
             })?;
 
         let decoded: delete_spec::Response = serde_json::from_value(resp)
@@ -243,7 +309,30 @@ impl Store {
     }
 }
 
-/// One `list/0.2` page: its live entries this tool can read, and the cursor
+/// The explanation for a refusal of `purpose` (`vta/memory/*:purposeNotGranted`),
+/// naming the `pnm` command that grants it; `None` for any other error.
+///
+/// The VTA refuses a purpose the caller's ACL entry does not grant, or — at the
+/// version this store does not send — none named where the entry lists more
+/// than one (VTI-ACL-103, VTI-ACL-104). Nothing was read or written.
+pub fn purpose_refused(e: &VtaError, purpose: &str) -> Option<String> {
+    let VtaError::Rejected { code, .. } = e else {
+        return None;
+    };
+    if !(code.starts_with("vta/memory/") && code.ends_with(":purposeNotGranted")) {
+        return None;
+    }
+    Some(format!(
+        "the VTA refused this memory operation: this agent's access entry does not grant the \
+         purpose `{purpose}`, which every memory read names. Nothing was read or written.\n\n\
+         Either grant it (keeping any purposes the entry already lists):\n  \
+         pnm acl update <this agent's DID> --purposes {purpose}[,<others>]\n\n\
+         or name a purpose the entry does grant, as `purpose` in the memory config \
+         (`vta-agent-memory doctor` shows the agent's DID and the config path)."
+    ))
+}
+
+/// One `list/0.3` page: its live entries this tool can read, and the cursor
 /// for the next page.
 fn decode_page(resp: Value) -> anyhow::Result<(Vec<Entry>, Option<String>)> {
     let page: list_spec::Response = serde_json::from_value(resp)?;
