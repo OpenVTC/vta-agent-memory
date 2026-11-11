@@ -269,6 +269,7 @@ pub async fn connect(args: ConnectArgs) -> anyhow::Result<SetupOutcome> {
         },
         recall_limit: args.recall_limit,
         purpose: None,
+        rooms: Vec::new(),
     };
 
     // Verify over the connection just made, then close it — a DIDComm client

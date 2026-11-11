@@ -161,6 +161,7 @@ async fn setup_body(
         identity,
         recall_limit: 8,
         purpose: None,
+        rooms: Vec::new(),
     };
     let memories_found = verify(&cfg).await?;
 

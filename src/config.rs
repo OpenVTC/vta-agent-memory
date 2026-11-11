@@ -153,6 +153,11 @@ pub struct Config {
     /// Must be one the agent's access entry grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    /// Data Rooms recall also reads (#34), each with the host it is read from —
+    /// nothing maps a room to its host, so it is named here. Read only, never
+    /// written to: saving to a room stays an explicit act of the user's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rooms: Vec<crate::rooms::RoomSource>,
 }
 
 /// Overrides the configured purpose for this process.
@@ -275,6 +280,7 @@ mod tests {
             },
             recall_limit: 8,
             purpose: None,
+            rooms: Vec::new(),
         }
     }
 
