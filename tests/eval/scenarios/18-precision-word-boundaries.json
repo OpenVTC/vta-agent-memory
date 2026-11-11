@@ -1,7 +1,7 @@
 {
   "name": "precision-word-boundaries",
   "dimension": "precision",
-  "description": "Query terms should match words, not fragments of words. Known gap: ranking uses substring containment, so 'run' matches 'runner' and 'test' matches 'latest', and a memory that merely contains the letters can outrank the one that answers.",
+  "description": "Query terms match words, not fragments of words: 'run' must not match 'runner', nor 'test' match 'latest'. Fixed by whole-word matching; these probes were soft (a known gap) until then.",
   "steps": [
     {
       "save": {
@@ -15,7 +15,7 @@
       "save": {
         "type": "feedback",
         "name": "Test runner",
-        "description": "Tests are run by the CI only",
+        "description": "Tests are executed by the CI only",
         "body": ""
       }
     },
@@ -34,8 +34,7 @@
         "relevant": [
           "feedback/test-command"
         ],
-        "top": "feedback/test-command",
-        "soft": true
+        "top": "feedback/test-command"
       }
     },
     {
@@ -44,8 +43,7 @@
         "query": "test",
         "absent": [
           "project/latest-release"
-        ],
-        "soft": true
+        ]
       }
     }
   ]

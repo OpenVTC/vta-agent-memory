@@ -198,7 +198,8 @@ longer sends, returned the whole context with no prefix at all.) Everything in
   `confidence`: the rooms schema it comes from says a reader MUST NOT compare it
   across authors. Keep `basis`/`evidence` as strings/raw values in the record —
   a typed field would make a newer writer's record undecodable.
-- `rank()` is weighted token containment. Deliberately crude; see its doc
+- `rank()` is weighted whole-word matching, plurals folded, query stopwords
+  dropped. Not substring containment: that let "run" match "runner". Deliberately crude; see its doc
   comment before replacing it.
 
 `Store::list` is the single place to change if the upstream task ever grows a

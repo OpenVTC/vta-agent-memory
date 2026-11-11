@@ -1,7 +1,7 @@
 {
   "name": "minimisation-stopwords",
   "dimension": "minimisation",
-  "description": "A query made only of function words should not match every memory that happens to contain them. Known gap: ranking has no stopword list, so 'the' and 'for' count as terms.",
+  "description": "A query made only of function words matches nothing, rather than every memory that contains them. Fixed by the query stopword list; this probe was soft (a known gap) until then.",
   "steps": [
     {
       "save": {
@@ -47,8 +47,7 @@
       "probe": {
         "label": "function words only",
         "query": "what is the for",
-        "expectEmpty": true,
-        "soft": true
+        "expectEmpty": true
       }
     },
     {
