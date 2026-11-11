@@ -31,7 +31,8 @@ src/
   record.rs    the record shape, key encoding, and recall ranking
   authorship.rs  signing records on save, verifying author + location on read
   provenance.rs  basis / confidence / evidence: vocabulary, checks, rank weight
-  server.rs    the six MCP tools
+  lifecycle.rs   status, validUntil/reviewAfter, history keys, standing
+  server.rs    the nine MCP tools
 tests/
   memory_roundtrip.rs        Store end-to-end against an in-process fake VTA
   mcp_starts_without_a_vta.rs  the real binary, over stdio, with no VTA
@@ -161,6 +162,16 @@ writer signed); a `v >= 2` record with no `proof` is refused, not downgraded to
 unattributed; and the resolver is `did:key`-only, so a stored record can never
 make recall fetch a URL. The signer is loaded from the session store **after**
 connecting — the first connect of an enrolled identity rotates its key.
+
+**A save never overwrites blind.** `Store::save_versioned` reads, archives the
+current version to `archive/<key>/v<n>`, then writes with `expectedVersion` =
+the version it read; a `versionConflict` is a `SaveOutcome::Conflict` carrying the
+(checked) winner, never an error to retry. Do not "fix" a conflict by re-saving
+unconditionally — that is the lost update this exists to prevent. History keys
+must stay outside every `<type>/` prefix, and `forget` must delete them: "forget"
+has to mean forget. A status change is a new version signed by whoever made it;
+only `retract` is allowed on a refused record, because anything else would
+re-sign content nobody vouches for.
 
 ## The retrieval constraint
 

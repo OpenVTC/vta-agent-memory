@@ -94,6 +94,9 @@ fn every_memory_tool_is_offered_with_no_vta_reachable() {
         "memory_forget",
         "memory_list",
         "memory_context",
+        "memory_retract",
+        "memory_dispute",
+        "memory_deprecate",
     ] {
         assert!(
             names.contains(&expected),

@@ -31,6 +31,7 @@
 
 use crate::authorship::Authorship;
 use crate::fence::Fence;
+use crate::lifecycle::Standing;
 use crate::provenance::{self, Basis, Evidence};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -267,6 +268,24 @@ pub struct MemoryRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<serde_json::Value>,
 
+    // ---- lifecycle (#33): the record's standing. See `crate::lifecycle`.
+    /// `active` (absent means active), `deprecated`, `disputed`, `retracted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Why the status is what it is — required for anything but active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    /// RFC 3339. After it the memory has expired and recall leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+    /// RFC 3339. After it the memory is flagged for review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_after: Option<String>,
+    /// `{ "key": <history key>, "version": n }` — the version this one
+    /// replaced, kept verbatim under its history key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<serde_json::Value>,
+
     // ---- v2: authorship. Set by `authorship::Signer::sign`, never by a caller,
     // and only believed once `authorship::verify` has checked them against the
     // proof and the place the record was found.
@@ -308,6 +327,11 @@ impl MemoryRecord {
             basis: None,
             confidence: None,
             evidence: Vec::new(),
+            status: None,
+            status_reason: None,
+            valid_until: None,
+            review_after: None,
+            supersedes: None,
             author: None,
             author_kind: None,
             context_id: None,
@@ -363,6 +387,11 @@ impl MemoryRecord {
                 basis: None,
                 confidence: None,
                 evidence: Vec::new(),
+                status: None,
+                status_reason: None,
+                valid_until: None,
+                review_after: None,
+                supersedes: None,
                 author: None,
                 author_kind: None,
                 context_id: None,
@@ -439,6 +468,29 @@ impl MemoryRecord {
                 .map_err(|e| format!("malformed `evidence`: {e}"))?;
             provenance::check(basis, self.confidence, &evidence)?;
         }
+        // Lifecycle: a status other than active must say why, and dates must
+        // be dates (stored normalised, so they compare).
+        let status = crate::lifecycle::Status::parse(self.status.as_deref()).ok_or_else(|| {
+            format!(
+                "unknown `status` `{}`",
+                self.status.as_deref().unwrap_or("")
+            )
+        })?;
+        match (&self.status_reason, status) {
+            (Some(r), _) => crate::lifecycle::check_reason(r)?,
+            (None, crate::lifecycle::Status::Active) => {}
+            (None, s) => return Err(format!("a `{}` memory needs a reason", s.as_str())),
+        }
+        for (field, value) in [
+            ("validUntil", &self.valid_until),
+            ("reviewAfter", &self.review_after),
+        ] {
+            if let Some(v) = value
+                && crate::lifecycle::normalise_date(field, v)? != *v
+            {
+                return Err(format!("`{field}` is not normalised RFC 3339: `{v}`"));
+            }
+        }
         Ok(())
     }
 
@@ -512,21 +564,67 @@ pub struct Entry {
     pub key: MemoryKey,
     pub record: MemoryRecord,
     pub authorship: Authorship,
+    /// The version the VTA holds it at — what an update passes back as
+    /// `expectedVersion`. 0 for an entry that did not come from a VTA.
+    pub version: u64,
+    /// Its status, expiry and review state, judged when it was read.
+    pub standing: Standing,
 }
 
 impl Entry {
-    /// [`MemoryRecord::summary`] plus who wrote it — what recall returns.
+    /// An entry that did not come from a VTA: unattributed, version 0, judged
+    /// now. For tests and local ranking.
+    pub fn local(key: MemoryKey, record: MemoryRecord) -> Self {
+        let standing = Standing::of(&record, chrono::Utc::now());
+        Self {
+            key,
+            record,
+            authorship: Authorship::Unattributed,
+            version: 0,
+            standing,
+        }
+    }
+
+    /// [`MemoryRecord::summary`] plus who wrote it, its version and its
+    /// standing — what recall returns.
     pub fn summary(&self) -> serde_json::Value {
         let mut v = self.record.summary(&self.key);
-        v["author"] = self.authorship.to_json();
+        self.annotate(&mut v);
         v
     }
 
-    /// [`MemoryRecord::full`] plus who wrote it — what get returns.
+    /// [`MemoryRecord::full`] plus the same — what get returns.
     pub fn full(&self) -> serde_json::Value {
         let mut v = self.record.full(&self.key);
-        v["author"] = self.authorship.to_json();
+        self.annotate(&mut v);
         v
+    }
+
+    fn annotate(&self, v: &mut serde_json::Value) {
+        v["author"] = self.authorship.to_json();
+        v["version"] = serde_json::json!(self.version);
+        let life = crate::lifecycle::to_json(&self.record, self.standing);
+        if let (Some(v), Some(l)) = (v.as_object_mut(), life.as_object()) {
+            v.extend(l.clone());
+        }
+    }
+
+    /// Notes for a rendered listing: status, basis, authorship.
+    pub fn notes(&self) -> Vec<String> {
+        [
+            crate::lifecycle::note(&self.record, self.standing),
+            self.record.basis_note(),
+            self.authorship.note(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// How much this entry counts in ranking beyond its relevance: basis
+    /// weight times standing weight.
+    pub fn weight(&self) -> u32 {
+        self.record.basis_weight() * self.standing.weight()
     }
 }
 
@@ -550,7 +648,10 @@ pub struct Hit {
 /// ([`provenance::weight`]): a stated preference outranks an inference that
 /// matches the query equally well, but a strong match on an inference still
 /// beats a passing mention of a stated fact. `confidence` is never ranked on —
-/// two authors' estimates are not on one scale.
+/// two authors' estimates are not on one scale. It is multiplied again by the
+/// entry's standing ([`crate::lifecycle::weight`]): a deprecated or disputed
+/// memory counts half. (Retracted and expired memories never reach ranking —
+/// `Store::recall` leaves them out.)
 ///
 /// An empty query scores everything 0, which makes recall degrade into list —
 /// the right behaviour for a session-start hook that just wants what is there.
@@ -589,7 +690,7 @@ pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
                         s
                     })
                     .sum();
-                relevance * entry.record.basis_weight()
+                relevance * entry.weight()
             };
             Hit { entry, score }
         })
@@ -598,12 +699,7 @@ pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
-            .then_with(|| {
-                b.entry
-                    .record
-                    .basis_weight()
-                    .cmp(&a.entry.record.basis_weight())
-            })
+            .then_with(|| b.entry.weight().cmp(&a.entry.weight()))
             .then_with(|| b.entry.record.updated_at.cmp(&a.entry.record.updated_at))
             .then_with(|| a.entry.key.to_string().cmp(&b.entry.key.to_string()))
     });
@@ -615,11 +711,10 @@ mod tests {
     use super::*;
 
     fn entry(kind: MemoryType, name: &str, desc: &str, body: &str) -> Entry {
-        Entry {
-            key: MemoryKey::new(kind, name).unwrap(),
-            record: MemoryRecord::new(kind, name, desc, body, vec![]),
-            authorship: Authorship::Unattributed,
-        }
+        Entry::local(
+            MemoryKey::new(kind, name).unwrap(),
+            MemoryRecord::new(kind, name, desc, body, vec![]),
+        )
     }
 
     #[test]

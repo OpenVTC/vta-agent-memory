@@ -1,4 +1,4 @@
-//! The MCP surface: five memory tools over stdio.
+//! The MCP surface: nine memory tools over stdio.
 //!
 //! Narrow on purpose. `vta-mcp` already exposes the VTA's whole management
 //! console — including `vta_call`, which can reach `vta/memory/*` today. This
@@ -22,8 +22,10 @@ use serde::Deserialize;
 
 use crate::fence::{Fence, Provenance};
 use crate::lazy::LazyStore;
+use crate::lifecycle::{Status, normalise_date};
 use crate::provenance::{Basis, Evidence};
 use crate::record::{MemoryKey, MemoryRecord, MemoryType};
+use crate::store::SaveOutcome;
 use crate::store::Store;
 
 /// `memory_list` page size when the caller does not ask for one.
@@ -67,6 +69,43 @@ fn fenced_json(value: impl serde::Serialize) -> Result<CallToolResult, McpError>
         ContentBlock::text(Fence::sanitize(&json)),
         ContentBlock::text(fence.close()),
     ]))
+}
+
+/// A save's outcome as tool output. A conflict is not an error: it carries
+/// what is stored now, which the caller needs to merge — fenced, since it is
+/// stored text somebody else wrote.
+fn outcome_json(store: &Store, outcome: SaveOutcome) -> Result<CallToolResult, McpError> {
+    match outcome {
+        SaveOutcome::Saved {
+            key,
+            version,
+            superseded,
+        } => ok_json(serde_json::json!({
+            "key": key.to_string(),
+            "contextId": store.context_id(),
+            "saved": true,
+            "version": version,
+            "supersededVersion": superseded,
+        })),
+        SaveOutcome::Conflict { key, conflict } => {
+            let current = match &conflict.current {
+                Some(Ok(entry)) => entry.full(),
+                Some(Err(refused)) => serde_json::json!({ "refused": refused.to_json() }),
+                None => serde_json::Value::Null,
+            };
+            fenced_json(serde_json::json!({
+                "key": key.to_string(),
+                "contextId": store.context_id(),
+                "saved": false,
+                "conflict": conflict.reason,
+                "currentVersion": conflict.current_version,
+                "current": current,
+                "next": "Nothing was overwritten. Read `current`, merge if it still makes sense, \
+                         and save again with `expectedVersion` set to `currentVersion` — or tell \
+                         the user the memory changed under you.",
+            }))
+        }
+    }
 }
 
 /// Surface an anyhow chain to the model with its context intact — the VTA's
@@ -124,6 +163,31 @@ pub struct SaveParams {
     /// by key, or a data-room record. At most 8.
     #[serde(default)]
     pub evidence: Vec<Evidence>,
+    /// When updating a memory you read, the `version` recall or get returned
+    /// for it — the save is refused, and you are shown what is there instead,
+    /// if anybody changed it since. `0` means "this must be new". Omit to
+    /// replace whatever is there now.
+    #[serde(default, rename = "expectedVersion")]
+    pub expected_version: Option<u64>,
+    /// Optional date (`2026-12-01`) after which this is no longer true, and
+    /// recall stops returning it. For facts with a shelf life.
+    #[serde(default, rename = "validUntil")]
+    pub valid_until: Option<String>,
+    /// Optional date after which this should be confirmed with the user;
+    /// recall flags it `stale`. For preferences that drift.
+    #[serde(default, rename = "reviewAfter")]
+    pub review_after: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StatusParams {
+    /// The memory's key, as returned by `memory_recall`.
+    pub key: String,
+    /// Why, in one line. Shown with the memory from now on.
+    pub reason: String,
+    /// The `version` you read, so a change made since is not overridden.
+    #[serde(default, rename = "expectedVersion")]
+    pub expected_version: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -146,6 +210,10 @@ pub struct GetParams {
     /// The memory's key, as returned by `memory_recall` (e.g.
     /// `feedback/no-pr-attribution`).
     pub key: String,
+    /// Also return the earlier versions this one superseded (at most 5),
+    /// newest first.
+    #[serde(default)]
+    pub history: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -167,6 +235,10 @@ pub struct ListParams {
     /// `nextOffset` to get the next page.
     #[serde(default)]
     pub offset: Option<usize>,
+    /// Only memories due for review or expired — for confirming or clearing
+    /// out what may no longer be true.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// The MCP server.
@@ -188,6 +260,23 @@ impl MemoryMcp {
     /// The connected store, or a tool error naming the fix.
     async fn store(&self) -> Result<&Store, McpError> {
         self.lazy.store().await.map_err(to_mcp)
+    }
+
+    /// Change a memory's status and report the outcome.
+    async fn set_status(
+        &self,
+        p: StatusParams,
+        status: Status,
+    ) -> Result<CallToolResult, McpError> {
+        let key =
+            MemoryKey::parse(&p.key).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        crate::lifecycle::check_reason(&p.reason).map_err(|e| McpError::invalid_params(e, None))?;
+        let store = self.store().await?;
+        let outcome = store
+            .set_status(&key, status, &p.reason, p.expected_version)
+            .await
+            .map_err(to_mcp)?;
+        outcome_json(store, outcome)
     }
 
     /// Default `limit` for recall. Falls back rather than failing: a caller who
@@ -234,19 +323,79 @@ impl MemoryMcp {
                 None,
             )
         })?;
-        let record = MemoryRecord::new(kind, &p.name, &p.description, &p.body, p.links)
+        let mut record = MemoryRecord::new(kind, &p.name, &p.description, &p.body, p.links)
             .with_provenance(basis, p.confidence, p.evidence);
+        let date = |field: &str, raw: Option<String>| {
+            raw.map(|d| normalise_date(field, &d))
+                .transpose()
+                .map_err(|e| McpError::invalid_params(e, None))
+        };
+        record.valid_until = date("validUntil", p.valid_until)?;
+        record.review_after = date("reviewAfter", p.review_after)?;
         // Before connecting: an oversized save is the caller's mistake, and
         // saying so must not depend on the VTA being reachable.
         record
             .check_limits()
             .map_err(|e| McpError::invalid_params(e, None))?;
-        let key = self.store().await?.save(&record).await.map_err(to_mcp)?;
-        ok_json(serde_json::json!({
-            "key": key.to_string(),
-            "contextId": self.store().await?.context_id(),
-            "saved": true,
-        }))
+        let store = self.store().await?;
+        let outcome = store
+            .save_versioned(&record, p.expected_version)
+            .await
+            .map_err(to_mcp)?;
+        outcome_json(store, outcome)
+    }
+
+    #[tool(
+        description = "Withdraw a memory that is wrong or should no longer be used, keeping a \
+                       record that it existed and why it was withdrawn. Its content no longer \
+                       recalls (the previous version stays in its history). Prefer this to \
+                       `memory_forget` when a memory turns out to be wrong; forget is for when the \
+                       user wants it gone entirely.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn memory_retract(
+        &self,
+        Parameters(p): Parameters<StatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.set_status(p, Status::Retracted).await
+    }
+
+    #[tool(
+        description = "Mark a memory as disputed — somebody (the user, or evidence you found) says \
+                       it is wrong, but it is not settled. It still recalls, ranked lower and \
+                       shown as disputed with your reason. Save it again to settle it.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn memory_dispute(
+        &self,
+        Parameters(p): Parameters<StatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.set_status(p, Status::Disputed).await
+    }
+
+    #[tool(
+        description = "Mark a memory as deprecated — out of date or replaced by another, but worth \
+                       keeping for reference. It still recalls, ranked lower and shown as \
+                       deprecated with your reason.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn memory_deprecate(
+        &self,
+        Parameters(p): Parameters<StatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.set_status(p, Status::Deprecated).await
     }
 
     #[tool(
@@ -259,7 +408,11 @@ impl MemoryMcp {
                        or `unattributed` (written before records were signed — nothing vouches \
                        for who wrote it). `refused` lists stored records that failed their \
                        signature check — altered, or copied from elsewhere; they are not \
-                       returned as memory, and the user should be told about them.",
+                       returned as memory, and the user should be told about them. Retracted and \
+                       expired memories are left out; `status` says when one is `deprecated` or \
+                       `disputed` (ranked lower, with `statusReason`), and `stale: true` means it \
+                       is past its review date — confirm it before relying on it. Pass a \
+                       result's `version` as `expectedVersion` when you update it.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn memory_recall(
@@ -287,7 +440,8 @@ impl MemoryMcp {
 
     #[tool(
         description = "Read one memory in full, by the key `memory_recall` returned. Use after \
-                       recall when a summary is not enough.",
+                       recall when a summary is not enough. `history: true` adds the earlier \
+                       versions it superseded, each with its own author.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn memory_get(
@@ -296,8 +450,17 @@ impl MemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let key =
             MemoryKey::parse(&p.key).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        match self.store().await?.get(&key).await.map_err(to_mcp)? {
-            Some(entry) => fenced_json(entry.full()),
+        let store = self.store().await?;
+        match store.get(&key).await.map_err(to_mcp)? {
+            Some(entry) => {
+                let mut v = entry.full();
+                if p.history {
+                    let history = store.history(&key).await.map_err(to_mcp)?;
+                    v["history"] =
+                        serde_json::Value::Array(history.iter().map(|e| e.full()).collect());
+                }
+                fenced_json(v)
+            }
             None => Err(McpError::invalid_params(
                 format!(
                     "no memory `{key}` in context `{}`",
@@ -338,7 +501,9 @@ impl MemoryMcp {
                        `total` for how many exist and `nextOffset` for the next page. Use when the \
                        user asks what you remember; use `memory_recall` when you are looking for \
                        something specific. Summaries carry `author` as in `memory_recall`, and \
-                       `refused` lists records that failed their signature check.",
+                       `refused` lists records that failed their signature check. Unlike recall, \
+                       it includes retracted and expired memories, with their `status`; \
+                       `stale: true` lists only those due for review or expired.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn memory_list(
@@ -354,6 +519,9 @@ impl MemoryMcp {
         let store = self.store().await?;
         let listing = store.list_of_type(kind).await.map_err(to_mcp)?;
         let mut entries = listing.entries;
+        if p.stale {
+            entries.retain(|e| e.standing.stale || e.standing.expired);
+        }
         entries.sort_by_key(|e| e.key.to_string());
         let total = entries.len();
         let items: Vec<_> = entries
@@ -469,6 +637,9 @@ mod tests {
             "memory_forget",
             "memory_list",
             "memory_context",
+            "memory_retract",
+            "memory_dispute",
+            "memory_deprecate",
         ];
         let have: Vec<String> = router
             .list_all()
@@ -501,6 +672,14 @@ mod tests {
 
         let save = annotations("memory_save");
         assert_eq!(save.read_only_hint, Some(false));
+
+        // Status changes keep everything (the old version goes to history),
+        // so they are writes but not destructive ones.
+        for name in ["memory_retract", "memory_dispute", "memory_deprecate"] {
+            let a = annotations(name);
+            assert_eq!(a.read_only_hint, Some(false), "{name}");
+            assert_eq!(a.destructive_hint, Some(false), "{name}");
+        }
 
         for name in [
             "memory_recall",
@@ -647,6 +826,7 @@ mod tests {
                     kind: None,
                     limit,
                     offset,
+                    stale: false,
                 };
                 unfence(&mcp.memory_list(Parameters(params)).await.unwrap())
             }
@@ -688,6 +868,7 @@ mod tests {
         let result = mcp
             .memory_get(Parameters(GetParams {
                 key: "project/release-notes".to_string(),
+                history: false,
             }))
             .await
             .unwrap();
@@ -730,6 +911,9 @@ mod tests {
             basis: "declared".to_string(),
             confidence: None,
             evidence: vec![],
+            expected_version: None,
+            valid_until: None,
+            review_after: None,
         }
     }
 
@@ -747,6 +931,20 @@ mod tests {
             ("unknown basis", with("hearsay", None)),
             ("must cite", with("verified", None)),
             ("between 0 and 1", with("inferred", Some(1.5))),
+            (
+                "validUntil",
+                SaveParams {
+                    valid_until: Some("next tuesday".into()),
+                    ..with("declared", None)
+                },
+            ),
+            (
+                "reviewAfter",
+                SaveParams {
+                    review_after: Some("soon".into()),
+                    ..with("declared", None)
+                },
+            ),
         ] {
             let err = mcp.memory_save(Parameters(params)).await.unwrap_err();
             assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{what}: {err:?}");
