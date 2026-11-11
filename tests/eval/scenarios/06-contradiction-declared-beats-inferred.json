@@ -1,0 +1,40 @@
+{
+  "name": "contradiction-declared-beats-inferred",
+  "dimension": "contradiction",
+  "description": "The user said one thing; an agent later inferred the opposite with high confidence. What the user said ranks first, even though the inference is newer.",
+  "writers": [
+    "agent",
+    "other-agent"
+  ],
+  "steps": [
+    {
+      "save": {
+        "type": "user",
+        "name": "Answer length",
+        "description": "The user wants detailed thorough answers",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "user",
+        "name": "Answer length guess",
+        "description": "The user wants short terse answers",
+        "body": "",
+        "basis": "inferred",
+        "confidence": 0.9,
+        "as": "other-agent"
+      }
+    },
+    {
+      "probe": {
+        "label": "answer length",
+        "query": "answers",
+        "relevant": [
+          "user/answer-length"
+        ],
+        "top": "user/answer-length"
+      }
+    }
+  ]
+}

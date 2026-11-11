@@ -1,0 +1,49 @@
+{
+  "name": "staleness-superseded-fact",
+  "dimension": "staleness",
+  "description": "A fact updated from another device: recall returns the new value, never the version it superseded.",
+  "writers": [
+    "laptop",
+    "phone"
+  ],
+  "steps": [
+    {
+      "save": {
+        "type": "user",
+        "name": "Editor",
+        "description": "The user edits code in vim",
+        "body": "",
+        "as": "laptop"
+      }
+    },
+    {
+      "save": {
+        "type": "user",
+        "name": "Editor",
+        "description": "The user switched editors to helix",
+        "body": "",
+        "as": "phone"
+      }
+    },
+    {
+      "probe": {
+        "label": "which editor",
+        "query": "editor",
+        "relevant": [
+          "user/editor"
+        ],
+        "top": "user/editor",
+        "describe": {
+          "user/editor": "helix"
+        }
+      }
+    },
+    {
+      "probe": {
+        "label": "old value does not resurface",
+        "query": "vim",
+        "expectEmpty": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "name": "staleness-deprecated-loses",
+  "dimension": "staleness",
+  "description": "An old convention is deprecated in favour of a new one with equal relevance; the active one ranks first, the deprecated one is still visible.",
+  "steps": [
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Branch naming old",
+        "description": "Name branches user/topic for feature work",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Branch naming",
+        "description": "Name branches feat/topic for feature work",
+        "body": ""
+      }
+    },
+    {
+      "status": {
+        "key": "feedback/branch-naming-old",
+        "status": "deprecated",
+        "reason": "replaced by feedback/branch-naming"
+      }
+    },
+    {
+      "probe": {
+        "label": "branch naming",
+        "query": "name branches feature work",
+        "relevant": [
+          "feedback/branch-naming"
+        ],
+        "top": "feedback/branch-naming"
+      }
+    }
+  ]
+}

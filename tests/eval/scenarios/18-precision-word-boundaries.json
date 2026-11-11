@@ -1,0 +1,52 @@
+{
+  "name": "precision-word-boundaries",
+  "dimension": "precision",
+  "description": "Query terms should match words, not fragments of words. Known gap: ranking uses substring containment, so 'run' matches 'runner' and 'test' matches 'latest', and a memory that merely contains the letters can outrank the one that answers.",
+  "steps": [
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Test command",
+        "description": "Run the tests with cargo test",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Test runner",
+        "description": "Tests are run by the CI only",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Latest release",
+        "description": "The latest release shipped in October",
+        "body": ""
+      }
+    },
+    {
+      "probe": {
+        "label": "run the tests",
+        "query": "run the tests",
+        "relevant": [
+          "feedback/test-command"
+        ],
+        "top": "feedback/test-command",
+        "soft": true
+      }
+    },
+    {
+      "probe": {
+        "label": "a fragment does not match",
+        "query": "test",
+        "absent": [
+          "project/latest-release"
+        ],
+        "soft": true
+      }
+    }
+  ]
+}

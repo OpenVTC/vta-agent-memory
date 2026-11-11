@@ -1,0 +1,41 @@
+{
+  "name": "contradiction-evidence-matters",
+  "dimension": "contradiction",
+  "description": "Two claims to be verified; only one cites what it was checked against. The evidenced one ranks first; the unsupported one weighs as an inference.",
+  "steps": [
+    {
+      "save": {
+        "type": "user",
+        "name": "Employer",
+        "description": "The user is employed by Acme Corp",
+        "body": "",
+        "basis": "verified",
+        "evidence": [
+          {
+            "kind": "credential",
+            "credentialId": "urn:uuid:7d3e"
+          }
+        ]
+      }
+    },
+    {
+      "save": {
+        "type": "user",
+        "name": "Employer note",
+        "description": "The user is employed by Globex",
+        "body": "",
+        "basis": "observed"
+      }
+    },
+    {
+      "probe": {
+        "label": "employer",
+        "query": "employed by",
+        "relevant": [
+          "user/employer"
+        ],
+        "top": "user/employer"
+      }
+    }
+  ]
+}
