@@ -268,7 +268,15 @@ the "this was wrong" path; `forget` is still the hard delete, and takes the
 history with it.
 
 **Recall reaches the Data Rooms you belong to, read-only.** `vta-agent-memory
-rooms add --room <did> --host <did> [--label L]` adds a room for recall to search.
+rooms add --room <did> --host <did> [--member <did>] [--label L]` adds a room for
+recall to search. Your VTA presents a room's credentials only for a member persona
+in a context the memory agent's grant covers, so grant that persona's context too
+(`pnm acl update <agent DID> --contexts <memory context>,<persona's context>`).
+The room's credentials can be held under a *parent* of the persona's context; if
+the persona's own context is not enough, grant the parent.
+Pick a personal persona as `--member`, never the VTA's or a community's own DID,
+which would hand the agent their contexts. `doctor` reads each room and prints
+this command when the grant is missing.
 `memory_recall` then searches personal memory and those rooms together and ranks
 them on one scale. Every result says where it came from (`source`), who wrote it,
 its status and its basis. A sealed room record's in-body signature is checked

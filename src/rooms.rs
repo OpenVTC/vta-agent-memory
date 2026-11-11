@@ -151,9 +151,16 @@ impl RoomRecord {
         basis * status
     }
 
-    /// The name to rank on and show: the title, or the key for an untitled one.
+    /// The name to show: the title, or the key for an untitled one.
     pub fn name(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.key)
+    }
+
+    /// The name to rank on: the title only. A key is not a name — on a sealed
+    /// room it MUST be opaque, and keys like `note/<hash>` made every untitled
+    /// record match the word "note" (found against a live room).
+    pub fn rank_name(&self) -> &str {
+        self.title.as_deref().unwrap_or("")
     }
 
     /// What recall returns: no body, like a memory's summary.
@@ -438,6 +445,39 @@ fn clip(s: &str) -> String {
     format!("{}…", s.chars().take(MAX - 1).collect::<String>())
 }
 
+/// What to tell somebody whose room read was refused because the agent may
+/// not act as any member of the room, or `None` for any other failure.
+///
+/// The VTA presents a room's credentials only for a persona in a context the
+/// caller's grant covers (`room_oracle::principals`): the room capabilities an
+/// `application` grant carries are not enough on their own. A memory agent is
+/// granted its memory context, so reading a room means adding the context that
+/// holds the member persona — or its parent: against a live VTA the room's
+/// credentials were held under `openvtc-iiw1` while the persona's DID and key
+/// were in `openvtc-iiw1/oss-developer`, and only the parent grant worked
+/// (custody is checked by context, with ancestry, so a child grant does not
+/// reach a parent's credentials). A personal persona is the one to pick — naming
+/// the VTA's or a community's own identity would hand the agent their contexts.
+pub fn grant_hint(
+    error: &str,
+    agent_did: &str,
+    memory_context: &str,
+    member: Option<&str>,
+) -> Option<String> {
+    if !error.contains("notAMember") {
+        return None;
+    }
+    let who = member.unwrap_or("the member persona you read as");
+    Some(format!(
+        "The agent can act only as personas in the contexts it is granted. Add the context \
+         that holds {who}\n(`pnm did-mgmt dids list --full-display` shows each DID's \
+         context) — prefer a personal persona over the VTA's or a community's own DID:\n  \
+         pnm acl update {agent_did} --contexts {memory_context},<that context>\nThe room's \
+         credentials can be held under a parent of the persona's context: if granting the \
+         persona's own context is not enough, grant its parent."
+    ))
+}
+
 /// Which sources a recall reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sources {
@@ -606,7 +646,7 @@ pub async fn recall(
                     for record in read.records {
                         let score = crate::record::relevance(
                             &terms,
-                            record.name(),
+                            record.rank_name(),
                             &record.description,
                             &record.body,
                         ) * record.weight();
@@ -699,6 +739,25 @@ mod tests {
 
         let err = Sources::select(Some(&["nope".into()]), &configured).unwrap_err();
         assert!(err.contains("deals"), "{err}");
+    }
+
+    #[test]
+    fn a_not_a_member_refusal_names_the_grant_that_fixes_it() {
+        let hint = grant_hint(
+            "trust task failed [rooms/keys/browse:notAMember]: this VTA holds no …",
+            "did:key:zAgent",
+            "agent-memory",
+            Some("did:webvh:x:once-rug"),
+        )
+        .expect("a hint");
+        assert!(
+            hint.contains("pnm acl update did:key:zAgent --contexts agent-memory,<that context>")
+        );
+        assert!(hint.contains("did:webvh:x:once-rug"));
+        assert_eq!(
+            grant_hint("hostUnreachable", "did:key:zAgent", "agent-memory", None),
+            None
+        );
     }
 
     #[test]

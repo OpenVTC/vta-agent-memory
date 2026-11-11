@@ -646,7 +646,11 @@ fn rooms(config_path: &std::path::Path, action: RoomsAction) -> anyhow::Result<(
                 label,
             });
             cfg.save(config_path)?;
-            println!("Recall now reads room {room}. `doctor` checks it can be read.");
+            println!(
+                "Recall now reads room {room}. The memory agent can read it only as a member \
+                 persona in a context its grant covers; `doctor` checks, and says what to grant \
+                 if it cannot."
+            );
         }
         RoomsAction::Remove { room } => {
             let before = cfg.rooms.len();
@@ -724,7 +728,20 @@ async fn doctor(config_path: &std::path::Path) -> anyhow::Result<()> {
                     read.records.len(),
                     read.refused.len()
                 ),
-                Err(e) => println!("room        {name}: unavailable — {e:#}"),
+                Err(e) => {
+                    println!("room        {name}: unavailable — {e:#}");
+                    let agent = store.signer().map(|s| s.did()).unwrap_or("<agent DID>");
+                    if let Some(hint) = vta_agent_memory::rooms::grant_hint(
+                        &format!("{e:#}"),
+                        agent,
+                        &cfg.context_id,
+                        room.member.as_deref(),
+                    ) {
+                        for line in hint.lines() {
+                            println!("            {line}");
+                        }
+                    }
+                }
             }
         }
     }

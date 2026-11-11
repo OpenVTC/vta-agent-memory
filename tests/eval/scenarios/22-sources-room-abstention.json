@@ -1,16 +1,27 @@
 {
   "name": "sources-room-abstention",
   "dimension": "sources",
-  "description": "With rooms configured, a question nothing answers still gets nothing, and an open room's record is recalled marked as only host-reported.",
+  "description": "With rooms configured, a question nothing answers still gets nothing; an untitled record does not match on its storage key; and an open room's record is recalled marked as only host-reported.",
   "rooms": ["wiki"],
   "steps": [
     { "save": { "type": "user", "name": "Editor", "description": "The user edits in Helix" } },
     { "room": { "room": "wiki", "key": "style", "open": true, "title": "Code style", "description": "Rust code is formatted with rustfmt defaults" } },
+    { "room": { "room": "wiki", "key": "note/5e87dc2b0c00", "body": "lunch is at noon" } },
+    { "room": { "room": "wiki", "key": "note/28da83712071", "title": "IIW session notes", "body": "Agent memory demo went well" } },
     {
       "probe": {
         "label": "unrelated",
         "query": "kubernetes ingress certificates",
         "expectEmpty": true
+      }
+    },
+    {
+      "probe": {
+        "label": "an untitled record's key is not its name",
+        "query": "IIW notes",
+        "relevant": ["room:wiki/note/28da83712071"],
+        "top": "room:wiki/note/28da83712071",
+        "absent": ["room:wiki/note/5e87dc2b0c00"]
       }
     },
     {
