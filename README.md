@@ -208,7 +208,10 @@ context in key order and narrows by key prefix, but does not search. So:
   **descriptions, not bodies**. Bodies come back only from `memory_get`. A memory
   service that pastes every body into the context window has made the session
   worse.
-- Ranking is weighted token containment (name 4, description 2, body 1). Crude
+- Ranking is weighted whole-word matching (name 4, description 2, body 1), with
+  plurals folded to their singular and a short list of English stopwords
+  dropped from the query — so "run" does not match "runner", and "what is the"
+  matches nothing. Crude
   and predictable, chosen over embeddings because the VTA offers no vector index
   and a scoring function nobody can predict is worse than one everybody can.
 - Relevance is then weighted by **basis** — what kind of claim the memory is:

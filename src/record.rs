@@ -635,9 +635,77 @@ pub struct Hit {
     pub score: u32,
 }
 
+/// Words that carry no topic, dropped from a query before it is matched.
+///
+/// Without this, "what is the deploy for" scored every memory containing
+/// "the" or "for" — which is every memory — and a query of nothing but these
+/// words returned the context instead of nothing. Kept short and English on
+/// purpose: a word missing from here costs some precision, while a content word
+/// wrongly in here makes memories unfindable. Negations ("not", "never", "no")
+/// are deliberately absent — they change what a memory means.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "am", "an", "and", "any", "are", "as", "at", "be", "been", "by", "can", "could",
+    "did", "do", "does", "for", "from", "had", "has", "have", "how", "i", "if", "in", "into", "is",
+    "it", "its", "me", "my", "of", "on", "or", "our", "should", "so", "than", "that", "the",
+    "their", "them", "then", "there", "these", "they", "this", "those", "to", "us", "was", "we",
+    "were", "what", "when", "where", "which", "who", "whom", "why", "will", "with", "would", "you",
+    "your",
+];
+
+/// Split `s` into its words: runs of letters and digits, in any script,
+/// lowercased and reduced to a singular form (see [`singular`]).
+fn tokens(s: &str) -> impl Iterator<Item = String> + '_ {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| singular(&t.to_lowercase()))
+}
+
+/// The set of words in a field, for whole-word matching.
+fn words(s: &str) -> std::collections::HashSet<String> {
+    tokens(s).collect()
+}
+
+/// The terms a query is matched on: its words, less [`STOPWORDS`] and
+/// single characters, each once.
+fn query_terms(query: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for t in tokens(query) {
+        if t.chars().count() > 1 && !STOPWORDS.contains(&t.as_str()) && !terms.contains(&t) {
+            terms.push(t);
+        }
+    }
+    terms
+}
+
+/// A plural reduced to its singular, by rule — so "tests" finds "test" and
+/// "policies" finds "policy".
+///
+/// Plurals only, and deliberately so. A stemmer that also strips "-ing" and
+/// "-ed" has to guess ("named" → "nam"?), and a guess that is wrong makes a
+/// memory unfindable in a way nobody can predict; a plural rule is wrong rarely
+/// and visibly. Applied to both sides, so a mistake is at least symmetric.
+fn singular(w: &str) -> String {
+    let n = w.chars().count();
+    if n > 4 && w.ends_with("ies") {
+        return format!("{}y", &w[..w.len() - 3]);
+    }
+    if n > 4
+        && w.ends_with("es")
+        && ["sses", "xes", "ches", "shes", "zes"]
+            .iter()
+            .any(|e| w.ends_with(e))
+    {
+        return w[..w.len() - 2].to_string();
+    }
+    if n > 3 && w.ends_with('s') && !w.ends_with("ss") && !w.ends_with("us") && !w.ends_with("is") {
+        return w[..w.len() - 1].to_string();
+    }
+    w.to_string()
+}
+
 /// Rank `entries` against a free-text query.
 ///
-/// Scoring is deliberately dumb — token containment, weighted by field — and
+/// Scoring is deliberately dumb — whole-word matching, weighted by field — and
 /// that is a decision, not a shortcut. The alternative (embeddings) needs a
 /// model, a vector index, and somewhere to keep it; the VTA offers none of the
 /// three, and a scoring function nobody can predict is worse than a crude one
@@ -659,21 +727,16 @@ pub struct Hit {
 /// the user stated survives a limit ahead of what was inferred, and output is
 /// stable.
 pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
-    let terms: Vec<String> = query
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| t.len() > 1)
-        .map(|t| t.to_ascii_lowercase())
-        .collect();
-
+    let terms = query_terms(query);
     let mut hits: Vec<Hit> = entries
         .into_iter()
         .map(|entry| {
             let score = if terms.is_empty() {
                 0
             } else {
-                let name = entry.record.name.to_ascii_lowercase();
-                let desc = entry.record.description.to_ascii_lowercase();
-                let body = entry.record.body.to_ascii_lowercase();
+                let name = words(&entry.record.name);
+                let desc = words(&entry.record.description);
+                let body = words(&entry.record.body);
                 let relevance: u32 = terms
                     .iter()
                     .map(|t| {
@@ -949,6 +1012,71 @@ mod tests {
         assert_eq!(r.name, "New", "decoded as a record, not a foreign value");
         assert_eq!(r.basis(), None);
         assert_eq!(r.full(&key)["evidence"][0]["kind"], "notarised");
+    }
+
+    #[test]
+    fn terms_match_whole_words_not_fragments() {
+        // "run" is not in "runner", and "test" is not in "latest".
+        let hits = rank(
+            vec![
+                entry(MemoryType::Feedback, "Test runner", "executed by CI", ""),
+                entry(MemoryType::Project, "Latest release", "shipped", ""),
+            ],
+            "run",
+        );
+        assert!(hits.iter().all(|h| h.score == 0), "{hits:?}");
+        let hits = rank(
+            vec![entry(MemoryType::Project, "Latest release", "shipped", "")],
+            "test",
+        );
+        assert_eq!(hits[0].score, 0);
+    }
+
+    #[test]
+    fn plurals_match_their_singular_both_ways() {
+        for (query, text) in [
+            ("tests", "how to run the test"),
+            ("test", "the tests live here"),
+            ("policy", "retention policies"),
+            ("box", "inboxes and boxes"),
+            ("push", "no pushes to main"),
+        ] {
+            let hits = rank(vec![entry(MemoryType::User, "x", text, "")], query);
+            assert!(hits[0].score > 0, "{query:?} should find {text:?}");
+        }
+    }
+
+    #[test]
+    fn words_ending_in_s_that_are_not_plurals_are_left_alone() {
+        for w in ["status", "analysis", "process", "bus", "gas"] {
+            assert_eq!(singular(w), w, "{w}");
+        }
+    }
+
+    #[test]
+    fn a_query_of_only_stopwords_has_no_terms() {
+        assert!(query_terms("what is the for").is_empty());
+        assert_eq!(query_terms("what is the deploy for"), vec!["deploy"]);
+        // Negations are content: they change what is meant.
+        assert_eq!(query_terms("never push"), vec!["never", "push"]);
+    }
+
+    #[test]
+    fn non_latin_words_match() {
+        let hits = rank(
+            vec![entry(
+                MemoryType::User,
+                "Café",
+                "prefers the café on Straße",
+                "",
+            )],
+            "CAFÉ straße",
+        );
+        assert_eq!(
+            hits[0].score,
+            (4 + 2 + 2) * hits[0].entry.weight(),
+            "café in name and description, straße in description"
+        );
     }
 
     #[test]
