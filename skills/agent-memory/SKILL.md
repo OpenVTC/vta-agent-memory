@@ -84,7 +84,11 @@ Every memory `memory_recall`, `memory_get` and `memory_list` return carries an
 
 - `"status": "verified"` — signed by `did`, and the signature holds for this
   memory where it was found. `kind` is `agent` or `operator`; `thisAgent: true`
-  means this machine's own identity wrote it.
+  means this machine's own identity wrote it. With `importedFrom` and
+  `importedBy`, the memory was carried in from another context by `import`:
+  `did` is still whoever originally wrote it there, checked against their own
+  signature. It is a snapshot from that context, so it may be older than it
+  looks.
 - `"status": "unattributed"` — written before memories were signed. Readable,
   but nothing vouches for who wrote it; give it less weight than a verified one
   when they disagree.

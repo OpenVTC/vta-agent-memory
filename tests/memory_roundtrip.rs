@@ -581,6 +581,7 @@ async fn a_saved_memory_is_signed_and_comes_back_attributed_to_this_agent() {
             author: me.clone(),
             kind: Some(AuthorKind::Agent),
             by_this_agent: true,
+            imported: None,
         }
     );
     let summary = got.summary();
@@ -615,6 +616,7 @@ async fn a_memory_another_writer_saved_names_that_writer() {
             author: theirs,
             kind: Some(AuthorKind::Operator),
             by_this_agent: false,
+            imported: None,
         }
     );
     assert_eq!(hits[0].entry.summary()["author"]["kind"], "operator");
@@ -982,6 +984,7 @@ async fn a_replacing_save_keeps_the_previous_version_in_history() {
             author: first_author,
             kind: Some(AuthorKind::Agent),
             by_this_agent: true,
+            imported: None,
         },
         "the old version keeps its own author's signature"
     );

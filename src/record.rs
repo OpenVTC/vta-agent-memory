@@ -286,6 +286,16 @@ pub struct MemoryRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<serde_json::Value>,
 
+    // ---- #36: carried in from another context by `import`.
+    /// The record as its original author signed it in the context it was
+    /// exported from, verbatim. Present only on a record `import` wrote: the
+    /// importer signs this record (for where it now is), and a reader checks
+    /// that the original author's signed content is the same, so authorship
+    /// survives the move. Cleared by any later save — that writer is the
+    /// author from then on. See [`crate::authorship`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<serde_json::Value>,
+
     // ---- v2: authorship. Set by `authorship::Signer::sign`, never by a caller,
     // and only believed once `authorship::verify` has checked them against the
     // proof and the place the record was found.
@@ -332,6 +342,7 @@ impl MemoryRecord {
             valid_until: None,
             review_after: None,
             supersedes: None,
+            imported_from: None,
             author: None,
             author_kind: None,
             context_id: None,
@@ -392,6 +403,7 @@ impl MemoryRecord {
                 valid_until: None,
                 review_after: None,
                 supersedes: None,
+                imported_from: None,
                 author: None,
                 author_kind: None,
                 context_id: None,

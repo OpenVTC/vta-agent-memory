@@ -16,8 +16,9 @@ included in its encrypted backups. Revoking this machine's access is one
 
 A Claude Code plugin with:
 
-- **Six MCP tools** — `memory_recall`, `memory_get`, `memory_save`,
-  `memory_forget`, `memory_list`, `memory_context`.
+- **Nine MCP tools** — `memory_recall`, `memory_get`, `memory_save`,
+  `memory_retract`, `memory_dispute`, `memory_deprecate`, `memory_forget`,
+  `memory_list`, `memory_context`.
 - **A skill** (`agent-memory`) that says *when* to save and recall, what is
   worth keeping, and what must never go in. This is most of the value; the tools
   are the easy part.
@@ -266,6 +267,15 @@ reason) or `retracted` (a tombstone that never recalls) — plus `validUntil`
 the "this was wrong" path; `forget` is still the hard delete, and takes the
 history with it.
 
+**Memories can leave the VTA without losing who wrote them.** `export` writes a
+signed bundle of a context's memories — optionally narrowed by `--type`,
+`--basis` or `--status` — with each record's own author signature intact and the
+exporter's signature over the whole. `import` checks both and refuses a bundle
+that fails either, whole. An imported memory is signed by the importer for where
+it now is and carries the original, so it is still attributed to whoever first
+wrote it. The format is documented in [`docs/memory-bundle.md`](docs/memory-bundle.md)
+for readers that are not this crate.
+
 **Memory is not application state.** "Forget everything" has to stay a safe thing
 for a user to ask, which it stops being the moment account state lives here. The
 VTA's `vta/app-state/*/1.0` family — versioned, namespaced, with a change feed —
@@ -282,6 +292,8 @@ vta-agent-memory serve                       # MCP over stdio (the default)
 vta-agent-memory recall [--query Q] [--type T] [--limit N] [--full] [--format text|json]
 vta-agent-memory list [--type T]
 vta-agent-memory forget <key>
+vta-agent-memory export [--out FILE] [--type T] [--basis B] [--status S]
+vta-agent-memory import FILE|- [--replace] [--dry-run] [--type T] [--basis B] [--status S]
 vta-agent-memory doctor
 ```
 
