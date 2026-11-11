@@ -46,6 +46,7 @@ use vta_agent_memory::fence::{Fence, Provenance};
 use vta_agent_memory::lifecycle::Status;
 use vta_agent_memory::provenance::{Basis, Evidence};
 use vta_agent_memory::record::{MemoryKey, MemoryRecord, MemoryType};
+use vta_agent_memory::rooms::{self, Found, RoomSource, Sources};
 use vta_agent_memory::store::{SaveOutcome, Store};
 
 const CONTEXT: &str = "eval";
@@ -61,6 +62,8 @@ enum Dimension {
     Minimisation,
     Repairability,
     Poisoning,
+    /// Recall across personal memory and Data Rooms (#34).
+    Sources,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +80,10 @@ struct Scenario {
     /// take.
     #[serde(default)]
     max_repair_ops: Option<usize>,
+    /// Data Rooms recall reads, by label. Room records are written with
+    /// `room` steps; a probe narrows with `sources`.
+    #[serde(default)]
+    rooms: Vec<String>,
     steps: Vec<Step>,
 }
 
@@ -93,7 +100,45 @@ enum Step {
     Plant(PlantStep),
     /// Copy one stored value, signature and all, to another key.
     Copy(CopyStep),
+    /// A record in a Data Room, as the member's VTA serves it opened.
+    Room(RoomStep),
     Probe(Probe),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomStep {
+    /// The room's label, one of the scenario's `rooms`.
+    room: String,
+    /// The member who signs it. Default `member`.
+    #[serde(default, rename = "as")]
+    author: Option<String>,
+    key: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    basis: Option<String>,
+    /// `active` (default), `deprecated` or `retracted`.
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    valid_until: Option<String>,
+    /// An `open` room's record: cleartext, no in-body signature.
+    #[serde(default)]
+    open: bool,
+    /// Body fields changed after signing.
+    #[serde(default)]
+    alter: Map<String, Value>,
+    /// Served under this key instead of the one it was signed for.
+    #[serde(default)]
+    served_as: Option<String>,
+    /// The member the host records as author, if not the signer.
+    #[serde(default)]
+    host_author: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +250,10 @@ struct Probe {
     /// delimiters — stored text must not be able to forge one.
     #[serde(default)]
     fence: bool,
+    /// `personal`, `rooms`, or room labels. Omit for every source. Room
+    /// results are named `room:<label>/<key>` in every list above.
+    #[serde(default)]
+    sources: Option<Vec<String>>,
     /// Scored and reported, but a miss does not fail the run: a known gap.
     #[serde(default)]
     soft: bool,
@@ -258,10 +307,108 @@ struct Run {
     vta: Arc<FakeMemoryKeyspace>,
     stores: BTreeMap<String, Store>,
     reader: String,
+    rooms: Vec<RoomSource>,
+    /// Room members by name: `(did, private key)`.
+    members: std::sync::Mutex<BTreeMap<String, (String, String)>>,
+    room_version: std::sync::atomic::AtomicU64,
+}
+
+const ROOM_PREFIX: &str = "did:example:room:";
+
+fn room_source(label: &str) -> RoomSource {
+    RoomSource {
+        room_id: format!("{ROOM_PREFIX}{label}"),
+        host: "did:example:host".into(),
+        member: None,
+        label: Some(label.into()),
+    }
+}
+
+/// A room record's name in a probe: `room:<label>/<key>`.
+fn room_name(room_id: &str, key: &str) -> String {
+    format!(
+        "room:{}/{key}",
+        room_id.strip_prefix(ROOM_PREFIX).unwrap_or(room_id)
+    )
 }
 
 impl Run {
-    fn new(writers: &[String]) -> Self {
+    fn member(&self, name: &str) -> (String, String) {
+        self.members
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_insert_with(did_key)
+            .clone()
+    }
+
+    async fn room_step(&self, r: &RoomStep) -> Result<(), String> {
+        let source = self
+            .rooms
+            .iter()
+            .find(|s| s.label.as_deref() == Some(r.room.as_str()))
+            .ok_or_else(|| format!("room `{}` is not in the scenario's `rooms`", r.room))?;
+        let version = self
+            .room_version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let author = self.member(r.author.as_deref().unwrap_or("member"));
+        let host_author = match &r.host_author {
+            Some(m) => self.member(m).0,
+            None => author.0.clone(),
+        };
+        let mut fields = Map::new();
+        for (name, v) in [
+            ("title", &r.title),
+            ("description", &r.description),
+            ("body", &r.body),
+            ("basis", &r.basis),
+            ("validUntil", &r.valid_until),
+        ] {
+            if let Some(v) = v {
+                fields.insert(name.into(), Value::String(v.clone()));
+            }
+        }
+        let status = r.status.clone().unwrap_or_else(|| "active".into());
+        let mut entry = json!({
+            "key": r.served_as.as_deref().unwrap_or(&r.key),
+            "version": version,
+            "status": status,
+            "updatedAt": format!("2026-11-01T00:00:{:02}Z", version % 60),
+            "author": host_author,
+        });
+        if status == "retracted" {
+            // A tombstone: no body.
+        } else if r.open {
+            entry["cleartext"] = Value::Object(fields);
+        } else {
+            let sealed = sealed_body(
+                (&author.0, &author.1),
+                &source.room_id,
+                &r.key,
+                version,
+                Value::Object(fields),
+            )
+            .await;
+            entry["plaintext"] = if r.alter.is_empty() {
+                sealed.into()
+            } else {
+                use base64::Engine as _;
+                let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+                let mut body: Value =
+                    serde_json::from_slice(&b64.decode(sealed).map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?;
+                for (k, v) in &r.alter {
+                    body[k] = v.clone();
+                }
+                b64.encode(serde_json::to_vec(&body).unwrap()).into()
+            };
+        }
+        self.vta.room_record(&source.room_id, entry);
+        Ok(())
+    }
+
+    fn new(writers: &[String], rooms: &[String]) -> Self {
         let vta = Arc::new(FakeMemoryKeyspace::default());
         let writers = if writers.is_empty() {
             vec!["agent".to_string()]
@@ -276,6 +423,9 @@ impl Run {
             vta,
             stores,
             reader: writers[0].clone(),
+            rooms: rooms.iter().map(|l| room_source(l)).collect(),
+            members: Default::default(),
+            room_version: Default::default(),
         }
     }
 
@@ -360,6 +510,7 @@ impl Run {
                 self.vta.plant(CONTEXT, &c.to, value);
                 Ok(())
             }
+            Step::Room(r) => self.room_step(r).await,
             Step::Probe(_) => unreachable!("probes are run by `probe`"),
         }
     }
@@ -368,7 +519,25 @@ impl Run {
         let mut failures = Vec::new();
         let store = &self.stores[&self.reader];
         let kind = p.kind.as_deref().and_then(MemoryType::parse);
-        let recall = match store.recall(&p.query, kind, p.limit).await {
+        // The path `memory_recall` takes: personal memory and the rooms, ranked
+        // together.
+        let sources = match Sources::select(p.sources.as_deref(), &self.rooms) {
+            Ok(s) => s,
+            Err(e) => {
+                return ProbeResult {
+                    label: p.label.clone(),
+                    soft: p.soft,
+                    returned: vec![],
+                    precision: None,
+                    recall: None,
+                    reciprocal_rank: None,
+                    failures: vec![format!("sources: {e}")],
+                };
+            }
+        };
+        let resolver = vta_sdk::trust_task_proof::TrustTaskVmResolver::did_key_only();
+        let recall = match rooms::recall(store, &sources, &p.query, kind, p.limit, &resolver).await
+        {
             Ok(r) => r,
             Err(e) => {
                 return ProbeResult {
@@ -382,13 +551,37 @@ impl Run {
                 };
             }
         };
-        let returned: Vec<String> = recall
-            .hits
+        let summaries: Vec<Value> = recall
+            .found
             .iter()
-            .map(|h| h.entry.key.to_string())
+            .map(|f| {
+                let mut v = f.summary(CONTEXT);
+                if let Found::Room { record, .. } = f {
+                    v["key"] = room_name(&record.room_id, &record.key).into();
+                }
+                v
+            })
             .collect();
-        let summaries: Vec<Value> = recall.hits.iter().map(|h| h.entry.summary()).collect();
-        let refused: BTreeSet<&str> = recall.refused.iter().map(|r| r.key.as_str()).collect();
+        let returned: Vec<String> = summaries
+            .iter()
+            .map(|s| s["key"].as_str().unwrap_or_default().to_string())
+            .collect();
+        // A refused room record is reported as `room <roomId> / <key>`.
+        let refused_names: Vec<String> = recall
+            .refused
+            .iter()
+            .map(|r| {
+                match r
+                    .key
+                    .strip_prefix("room ")
+                    .and_then(|k| k.split_once(" / "))
+                {
+                    Some((room, key)) => room_name(room, key),
+                    None => r.key.clone(),
+                }
+            })
+            .collect();
+        let refused: BTreeSet<&str> = refused_names.iter().map(String::as_str).collect();
         let relevant: BTreeSet<&str> = p.relevant.iter().map(String::as_str).collect();
 
         // Metrics, where they apply.
@@ -502,7 +695,7 @@ fn fmt_keys(keys: &[String]) -> String {
 }
 
 async fn run(scenario: &Scenario) -> ScenarioResult {
-    let run = Run::new(&scenario.writers);
+    let run = Run::new(&scenario.writers, &scenario.rooms);
     let mut result = ScenarioResult {
         name: scenario.name.clone(),
         dimension: scenario.dimension,

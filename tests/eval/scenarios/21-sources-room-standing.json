@@ -1,0 +1,29 @@
+{
+  "name": "sources-room-standing",
+  "dimension": "sources",
+  "description": "A room's curation is respected: deprecated records rank below current ones, retracted and expired records are never recalled.",
+  "rooms": ["wiki"],
+  "steps": [
+    { "room": { "room": "wiki", "key": "old", "title": "Release checklist", "description": "Release checklist: tag, build, publish", "status": "deprecated" } },
+    { "room": { "room": "wiki", "key": "new", "title": "Release checklist v2", "description": "Release checklist: tag, build, sign, publish" } },
+    { "room": { "room": "wiki", "key": "gone", "status": "retracted" } },
+    { "room": { "room": "wiki", "key": "expired", "title": "Release checklist draft", "description": "Release checklist for the old pipeline", "validUntil": "2020-01-01T00:00:00Z" } },
+    {
+      "probe": {
+        "label": "query",
+        "query": "release checklist",
+        "relevant": ["room:wiki/new", "room:wiki/old"],
+        "top": "room:wiki/new",
+        "absent": ["room:wiki/gone", "room:wiki/expired"]
+      }
+    },
+    {
+      "probe": {
+        "label": "no query",
+        "query": "",
+        "top": "room:wiki/new",
+        "absent": ["room:wiki/gone", "room:wiki/expired"]
+      }
+    }
+  ]
+}

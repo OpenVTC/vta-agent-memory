@@ -26,6 +26,7 @@ one, make its probe hard.
 | `minimisation` | Does an unrelated question get nothing, and does recall stay within its limit? | abstention |
 | `repairability` | How many operations does correcting a wrong memory take? | — |
 | `poisoning` | Are tampered, relocated or stripped records refused, does the fence hold, and does keyword stuffing fail to outrank? | — |
+| `sources` | Across personal memory and Data Rooms: one ranking, `sources` narrowing, room curation respected, bad room signatures refused | — |
 
 ## Metrics
 
@@ -53,6 +54,7 @@ metrics for how much else came with it.
   "description": "What this checks and why.",
   "writers": ["laptop", "phone"],      // optional; the first one recalls. Default ["agent"]
   "maxRepairOps": 1,                   // optional
+  "rooms": ["deals"],                  // optional: Data Rooms recall reads, by label
   "steps": [
     { "save":   { "as": "phone", "type": "user", "name": "Editor",
                   "description": "…", "body": "…",
@@ -64,6 +66,14 @@ metrics for how much else came with it.
     { "tamper": { "key": "user/editor", "set": { "body": "…" }, "remove": ["proof"] } },
     { "plant":  { "key": "user/x", "value": "raw string or JSON object" } },
     { "copy":   { "from": "user/editor", "to": "user/other" } },
+    { "room":   { "room": "deals", "as": "alice", "key": "r1",
+                  "title": "…", "description": "…", "body": "…", "basis": "observed",
+                  "status": "active",            // or deprecated, retracted
+                  "validUntil": "…",
+                  "open": false,                 // an open room: cleartext, unsigned
+                  "alter": { "description": "…" },  // changed after signing
+                  "servedAs": "r2",              // served under another key
+                  "hostAuthor": "bob" } },       // host records someone else as author
     { "probe":  { "label": "…", "query": "…", "type": "user", "limit": 8,
                   "relevant": ["user/editor"],
                   "top": "user/editor",          // must rank first
@@ -73,10 +83,17 @@ metrics for how much else came with it.
                   "stale": ["user/editor"],      // must come back flagged stale
                   "describe": { "user/editor": "helix" },  // description must contain
                   "fence": false,                // rendered output keeps exactly one fence
+                  "sources": ["personal"],       // or "rooms", or room labels; default all
                   "soft": false } }
   ]
 }
 ```
+
+Probes take the path `memory_recall` takes: personal memory and the
+scenario's rooms, ranked together. A room record is named
+`room:<label>/<key>` in `relevant`, `top`, `absent`, `refused` and
+`describe`; personal memories keep their own keys. Room records are versioned
+in step order and signed by a fresh `did:key` per member named in `as`.
 
 Dates in `validUntil` / `reviewAfter` are stored as given, so write normalised
 RFC 3339 (`2020-01-01T00:00:00+00:00`). Probe with an empty `query` too — that

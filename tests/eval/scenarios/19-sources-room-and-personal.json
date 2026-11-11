@@ -1,0 +1,49 @@
+{
+  "name": "sources-room-and-personal",
+  "dimension": "sources",
+  "description": "Personal memory and a room hold the same topic: one ranking, what was observed in the room above what the agent inferred, and `sources` narrows to one side.",
+  "rooms": ["deals"],
+  "steps": [
+    { "save": { "type": "project", "name": "Northwind pricing", "description": "Northwind seems price-sensitive", "basis": "inferred" } },
+    { "save": { "type": "user", "name": "Timezone", "description": "The user works in UTC+8" } },
+    { "room": { "room": "deals", "as": "alice", "key": "r1", "title": "Northwind pricing accepted", "description": "Northwind accepted the pricing in the term sheet", "basis": "observed" } },
+    { "room": { "room": "deals", "as": "bob", "key": "r2", "title": "Offsite", "description": "The team offsite is in March" } },
+    {
+      "probe": {
+        "label": "both sources",
+        "query": "northwind pricing",
+        "relevant": ["room:deals/r1", "project/northwind-pricing"],
+        "top": "room:deals/r1",
+        "absent": ["room:deals/r2", "user/timezone"]
+      }
+    },
+    {
+      "probe": {
+        "label": "personal only",
+        "query": "northwind pricing",
+        "sources": ["personal"],
+        "relevant": ["project/northwind-pricing"],
+        "top": "project/northwind-pricing",
+        "absent": ["room:deals/r1"]
+      }
+    },
+    {
+      "probe": {
+        "label": "the room only",
+        "query": "northwind pricing",
+        "sources": ["deals"],
+        "relevant": ["room:deals/r1"],
+        "absent": ["project/northwind-pricing"]
+      }
+    },
+    {
+      "probe": {
+        "label": "a type leaves rooms out",
+        "query": "northwind pricing",
+        "type": "project",
+        "relevant": ["project/northwind-pricing"],
+        "absent": ["room:deals/r1"]
+      }
+    }
+  ]
+}
