@@ -1,0 +1,26 @@
+{
+  "name": "sources-room-abstention",
+  "dimension": "sources",
+  "description": "With rooms configured, a question nothing answers still gets nothing, and an open room's record is recalled marked as only host-reported.",
+  "rooms": ["wiki"],
+  "steps": [
+    { "save": { "type": "user", "name": "Editor", "description": "The user edits in Helix" } },
+    { "room": { "room": "wiki", "key": "style", "open": true, "title": "Code style", "description": "Rust code is formatted with rustfmt defaults" } },
+    {
+      "probe": {
+        "label": "unrelated",
+        "query": "kubernetes ingress certificates",
+        "expectEmpty": true
+      }
+    },
+    {
+      "probe": {
+        "label": "open room",
+        "query": "rustfmt formatting",
+        "relevant": ["room:wiki/style"],
+        "top": "room:wiki/style",
+        "describe": { "room:wiki/style": "rustfmt" }
+      }
+    }
+  ]
+}
