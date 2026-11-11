@@ -196,7 +196,7 @@ async fn resolve_context(client: &VtaClient, requested: Option<&str>) -> anyhow:
             if !ids.iter().any(|c| c == id) {
                 bail!(
                     "no trust context `{id}` on this VTA.\n\nAvailable: {}\n\nCreate one with:\n  \
-                     pnm contexts create --name {id}",
+                     pnm contexts create --id {id} --name {id}",
                     render_list(&ids)
                 );
             }
@@ -205,7 +205,7 @@ async fn resolve_context(client: &VtaClient, requested: Option<&str>) -> anyhow:
         None if ids.len() == 1 => Ok(ids[0].clone()),
         None if ids.is_empty() => bail!(
             "this VTA has no trust contexts yet. Create one for your memories:\n  \
-             pnm contexts create --name memory"
+             pnm contexts create --id memory --name memory"
         ),
         None => bail!(
             "several trust contexts exist — choose which one holds these memories with \
