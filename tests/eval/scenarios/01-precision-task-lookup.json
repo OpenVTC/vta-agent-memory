@@ -1,0 +1,87 @@
+{
+  "name": "precision-task-lookup",
+  "dimension": "precision",
+  "description": "A handful of unrelated memories; each task-shaped query should surface the one memory that answers it, first.",
+  "steps": [
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Use PRs",
+        "description": "Open pull requests rather than pushing to main",
+        "body": "main is protected; direct pushes fail CI"
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Deploy Thursdays",
+        "description": "Production deploys happen on Thursdays only",
+        "body": "Change freeze Friday to Wednesday"
+      }
+    },
+    {
+      "save": {
+        "type": "user",
+        "name": "Rust developer",
+        "description": "The user writes Rust and prefers clippy-clean code",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "reference",
+        "name": "Grafana dashboard",
+        "description": "Grafana dashboard for gateway latency",
+        "body": "https://grafana.example/d/gw"
+      }
+    },
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Commit trailers",
+        "description": "Do not add tool attribution trailers to commits",
+        "body": ""
+      }
+    },
+    {
+      "probe": {
+        "label": "opening a pull request",
+        "query": "how should I open a pull request",
+        "relevant": [
+          "feedback/use-prs"
+        ],
+        "top": "feedback/use-prs"
+      }
+    },
+    {
+      "probe": {
+        "label": "when to deploy",
+        "query": "when can I deploy to production",
+        "relevant": [
+          "project/deploy-thursdays"
+        ],
+        "top": "project/deploy-thursdays"
+      }
+    },
+    {
+      "probe": {
+        "label": "latency dashboard",
+        "query": "gateway latency dashboard",
+        "relevant": [
+          "reference/grafana-dashboard"
+        ],
+        "top": "reference/grafana-dashboard"
+      }
+    },
+    {
+      "probe": {
+        "label": "commit message conventions",
+        "query": "commit trailers attribution",
+        "relevant": [
+          "feedback/commit-trailers"
+        ],
+        "top": "feedback/commit-trailers"
+      }
+    }
+  ]
+}

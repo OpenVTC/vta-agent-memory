@@ -1,0 +1,57 @@
+{
+  "name": "precision-type-filter",
+  "dimension": "precision",
+  "description": "The same word in memories of different types; a type-filtered recall returns only that type.",
+  "steps": [
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Gateway reviews",
+        "description": "Gateway changes need two reviewers",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Gateway rollout",
+        "description": "The gateway rollout is in phase two",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "reference",
+        "name": "Gateway runbook",
+        "description": "Runbook for the gateway",
+        "body": "https://wiki.example/gw"
+      }
+    },
+    {
+      "probe": {
+        "label": "project only",
+        "query": "gateway",
+        "type": "project",
+        "relevant": [
+          "project/gateway-rollout"
+        ],
+        "top": "project/gateway-rollout",
+        "absent": [
+          "feedback/gateway-reviews",
+          "reference/gateway-runbook"
+        ]
+      }
+    },
+    {
+      "probe": {
+        "label": "all types",
+        "query": "gateway",
+        "relevant": [
+          "feedback/gateway-reviews",
+          "project/gateway-rollout",
+          "reference/gateway-runbook"
+        ]
+      }
+    }
+  ]
+}

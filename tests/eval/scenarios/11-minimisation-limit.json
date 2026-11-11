@@ -1,0 +1,122 @@
+{
+  "name": "minimisation-limit",
+  "dimension": "minimisation",
+  "description": "Many loosely related memories: recall honours its limit and keeps the closest match first.",
+  "steps": [
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 0",
+        "description": "Notes on service 0",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 1",
+        "description": "Notes on service 1",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 2",
+        "description": "Notes on service 2",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 3",
+        "description": "Notes on service 3",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 4",
+        "description": "Notes on service 4",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 5",
+        "description": "Notes on service 5",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 6",
+        "description": "Notes on service 6",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 7",
+        "description": "Notes on service 7",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 8",
+        "description": "Notes on service 8",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 9",
+        "description": "Notes on service 9",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 10",
+        "description": "Notes on service 10",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service 11",
+        "description": "Notes on service 11",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Service registry",
+        "description": "The service registry lists every service",
+        "body": ""
+      }
+    },
+    {
+      "probe": {
+        "label": "limit three",
+        "query": "service registry",
+        "limit": 3,
+        "relevant": [
+          "project/service-registry"
+        ],
+        "top": "project/service-registry"
+      }
+    }
+  ]
+}

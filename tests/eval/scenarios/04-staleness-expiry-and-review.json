@@ -1,0 +1,62 @@
+{
+  "name": "staleness-expiry-and-review",
+  "dimension": "staleness",
+  "description": "A fact past its validUntil drops out; one past its reviewAfter still recalls but is flagged stale; one valid into the future is unaffected.",
+  "steps": [
+    {
+      "save": {
+        "type": "project",
+        "name": "On leave",
+        "description": "The user is on leave this week",
+        "body": "",
+        "validUntil": "2020-01-01T00:00:00+00:00"
+      }
+    },
+    {
+      "save": {
+        "type": "user",
+        "name": "Leave notes",
+        "description": "Prefers terse leave handover notes",
+        "body": "",
+        "reviewAfter": "2020-01-01T00:00:00+00:00"
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Leave cover",
+        "description": "Alex covers on-call during leave",
+        "body": "",
+        "validUntil": "2999-01-01T00:00:00+00:00"
+      }
+    },
+    {
+      "probe": {
+        "label": "leave",
+        "query": "leave",
+        "relevant": [
+          "user/leave-notes",
+          "project/leave-cover"
+        ],
+        "absent": [
+          "project/on-leave"
+        ],
+        "stale": [
+          "user/leave-notes"
+        ]
+      }
+    },
+    {
+      "probe": {
+        "label": "at session start (no query)",
+        "query": "",
+        "absent": [
+          "project/on-leave"
+        ],
+        "stale": [
+          "user/leave-notes"
+        ]
+      }
+    }
+  ]
+}

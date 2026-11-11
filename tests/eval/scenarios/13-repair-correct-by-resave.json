@@ -1,0 +1,38 @@
+{
+  "name": "repair-correct-by-resave",
+  "dimension": "repairability",
+  "description": "A wrong value is corrected by saving the memory again: one operation, the old value goes to history, recall gives the new one.",
+  "maxRepairOps": 1,
+  "steps": [
+    {
+      "save": {
+        "type": "project",
+        "name": "Release day",
+        "description": "Releases are cut on Mondays",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Release day",
+        "description": "Releases are cut on Tuesdays",
+        "body": "",
+        "repair": true
+      }
+    },
+    {
+      "probe": {
+        "label": "after repair",
+        "query": "release cut",
+        "relevant": [
+          "project/release-day"
+        ],
+        "top": "project/release-day",
+        "describe": {
+          "project/release-day": "Tuesdays"
+        }
+      }
+    }
+  ]
+}

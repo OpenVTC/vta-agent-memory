@@ -354,6 +354,12 @@ config at all, asserting it completes an MCP handshake, offers all nine tools, a
 returns an actionable error from a tool call. That is a property about process
 lifetime, so it can only be observed by running the thing.
 
+`tests/eval.rs` is the memory quality evaluation: 18 scripted multi-session
+scenarios — precision, staleness, contradiction, minimisation, repairability,
+poisoning — replayed against the real store and scored (precision, recall, MRR,
+repair operations). `cargo test --test eval` prints the report; CI puts it in the
+job summary. See `tests/eval/README.md`.
+
 `tests/memory_roundtrip.rs` runs the real `VtaClient::memory_*` bodies through
 the SDK's in-process loopback transport into a fake keyspace with the VTA's own
 storage semantics — upsert on `(contextId, key)`, whole-context `list`,

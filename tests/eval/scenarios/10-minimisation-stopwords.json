@@ -1,0 +1,65 @@
+{
+  "name": "minimisation-stopwords",
+  "dimension": "minimisation",
+  "description": "A query made only of function words should not match every memory that happens to contain them. Known gap: ranking has no stopword list, so 'the' and 'for' count as terms.",
+  "steps": [
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Use PRs",
+        "description": "Open pull requests rather than pushing to main",
+        "body": "main is protected; direct pushes fail CI"
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Deploy Thursdays",
+        "description": "Production deploys happen on Thursdays only",
+        "body": "Change freeze Friday to Wednesday"
+      }
+    },
+    {
+      "save": {
+        "type": "user",
+        "name": "Rust developer",
+        "description": "The user writes Rust and prefers clippy-clean code",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "reference",
+        "name": "Grafana dashboard",
+        "description": "Grafana dashboard for gateway latency",
+        "body": "https://grafana.example/d/gw"
+      }
+    },
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Commit trailers",
+        "description": "Do not add tool attribution trailers to commits",
+        "body": ""
+      }
+    },
+    {
+      "probe": {
+        "label": "function words only",
+        "query": "what is the for",
+        "expectEmpty": true,
+        "soft": true
+      }
+    },
+    {
+      "probe": {
+        "label": "function words around one real term",
+        "query": "what is the deploy for",
+        "relevant": [
+          "project/deploy-thursdays"
+        ],
+        "top": "project/deploy-thursdays"
+      }
+    }
+  ]
+}

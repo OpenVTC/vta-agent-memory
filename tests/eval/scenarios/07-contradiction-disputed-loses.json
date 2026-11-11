@@ -1,0 +1,40 @@
+{
+  "name": "contradiction-disputed-loses",
+  "dimension": "contradiction",
+  "description": "Two memories disagree; one is disputed by the user. The undisputed one ranks first, and the disputed one stays visible for review.",
+  "steps": [
+    {
+      "save": {
+        "type": "project",
+        "name": "Database choice",
+        "description": "The service stores data in Postgres",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Database choice alt",
+        "description": "The service stores data in MySQL",
+        "body": ""
+      }
+    },
+    {
+      "status": {
+        "key": "project/database-choice-alt",
+        "status": "disputed",
+        "reason": "the user says it was migrated off MySQL"
+      }
+    },
+    {
+      "probe": {
+        "label": "which database",
+        "query": "service stores data",
+        "relevant": [
+          "project/database-choice"
+        ],
+        "top": "project/database-choice"
+      }
+    }
+  ]
+}

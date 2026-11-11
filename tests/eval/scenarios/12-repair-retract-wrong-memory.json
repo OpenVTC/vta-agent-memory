@@ -1,0 +1,49 @@
+{
+  "name": "repair-retract-wrong-memory",
+  "dimension": "repairability",
+  "description": "An agent inferred something wrong. One retract removes it from recall, leaving a tombstone.",
+  "maxRepairOps": 1,
+  "steps": [
+    {
+      "save": {
+        "type": "user",
+        "name": "Timezone",
+        "description": "The user works in Pacific time",
+        "body": "",
+        "basis": "inferred",
+        "confidence": 0.4
+      }
+    },
+    {
+      "probe": {
+        "label": "before repair: the wrong memory is what recall gives",
+        "query": "timezone",
+        "top": "user/timezone"
+      }
+    },
+    {
+      "status": {
+        "key": "user/timezone",
+        "status": "retracted",
+        "reason": "the user is in Singapore",
+        "repair": true
+      }
+    },
+    {
+      "probe": {
+        "label": "after repair",
+        "query": "timezone",
+        "expectEmpty": true
+      }
+    },
+    {
+      "probe": {
+        "label": "after repair, at session start (no query)",
+        "query": "",
+        "absent": [
+          "user/timezone"
+        ]
+      }
+    }
+  ]
+}

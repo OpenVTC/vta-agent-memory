@@ -1,0 +1,62 @@
+{
+  "name": "minimisation-abstention",
+  "dimension": "minimisation",
+  "description": "A question nothing in memory answers gets nothing back, not the least-irrelevant memories.",
+  "steps": [
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Use PRs",
+        "description": "Open pull requests rather than pushing to main",
+        "body": "main is protected; direct pushes fail CI"
+      }
+    },
+    {
+      "save": {
+        "type": "project",
+        "name": "Deploy Thursdays",
+        "description": "Production deploys happen on Thursdays only",
+        "body": "Change freeze Friday to Wednesday"
+      }
+    },
+    {
+      "save": {
+        "type": "user",
+        "name": "Rust developer",
+        "description": "The user writes Rust and prefers clippy-clean code",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "reference",
+        "name": "Grafana dashboard",
+        "description": "Grafana dashboard for gateway latency",
+        "body": "https://grafana.example/d/gw"
+      }
+    },
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Commit trailers",
+        "description": "Do not add tool attribution trailers to commits",
+        "body": ""
+      }
+    },
+    {
+      "probe": {
+        "label": "unrelated topic",
+        "query": "kubernetes ingress controller",
+        "expectEmpty": true
+      }
+    },
+    {
+      "probe": {
+        "label": "single characters only",
+        "query": "a b c",
+        "expectEmpty": false,
+        "limit": 3
+      }
+    }
+  ]
+}

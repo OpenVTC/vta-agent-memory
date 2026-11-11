@@ -89,6 +89,16 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+      # The memory quality evaluation (#35) already ran as part of `cargo test`
+      # above, where a failed hard check fails the build. This runs it again —
+      # it is already built and takes well under a second — to put the scored
+      # report in the job summary, so a change to ranking, provenance or
+      # lifecycle arrives with its numbers.
+      - name: Memory quality evaluation
+        env:
+          EVAL_SUMMARY: "1"
+        run: cargo test --all-features --test eval
+
   workflows:
     name: workflow hygiene
     runs-on: ubuntu-latest

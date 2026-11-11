@@ -1,0 +1,59 @@
+{
+  "name": "repair-dispute-then-settle",
+  "dimension": "repairability",
+  "description": "A memory is disputed, then settled by re-saving it: two operations, and the settled version is active and first.",
+  "maxRepairOps": 2,
+  "writers": [
+    "agent",
+    "phone"
+  ],
+  "steps": [
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Test command",
+        "description": "Run the tests with make test",
+        "body": ""
+      }
+    },
+    {
+      "save": {
+        "type": "feedback",
+        "name": "CI pipeline",
+        "description": "Pipelines execute on every merge to main",
+        "body": "",
+        "as": "phone"
+      }
+    },
+    {
+      "status": {
+        "key": "feedback/test-command",
+        "status": "disputed",
+        "reason": "the Makefile was removed",
+        "repair": true
+      }
+    },
+    {
+      "save": {
+        "type": "feedback",
+        "name": "Test command",
+        "description": "Run the tests with cargo test",
+        "body": "",
+        "repair": true
+      }
+    },
+    {
+      "probe": {
+        "label": "how to run tests",
+        "query": "run the tests",
+        "relevant": [
+          "feedback/test-command"
+        ],
+        "top": "feedback/test-command",
+        "describe": {
+          "feedback/test-command": "cargo test"
+        }
+      }
+    }
+  ]
+}

@@ -34,7 +34,9 @@ src/
   lifecycle.rs   status, validUntil/reviewAfter, history keys, standing
   server.rs    the nine MCP tools
 tests/
+  common/                    the in-process fake VTA + signers, shared
   memory_roundtrip.rs        Store end-to-end against an in-process fake VTA
+  eval.rs, eval/scenarios/   memory quality evaluation — scored scenarios
   mcp_starts_without_a_vta.rs  the real binary, over stdio, with no VTA
   hook_contract.rs           the SessionStart hook's contract
 ```
@@ -53,6 +55,14 @@ routing all sit below the loopback point. Those need a live VTA.
 
 Add a test there — not a unit test — whenever you change what goes on the wire
 or what `Store` does with what comes back.
+
+**Ranking, provenance and lifecycle changes go through the evaluation.**
+`cargo test --test eval` replays the scenarios in `tests/eval/scenarios/` and
+scores them; a failed hard check fails the build, and CI posts the report to the
+job summary. Change a weight and the numbers move — say in the PR how. A fix
+for a listed *known gap* should make its probe hard. A new behaviour gets a
+scenario, and an empty-`query` probe if it is about what must *not* surface:
+with a query, a zero score hides things that the session-start hook would show.
 
 ## Non-negotiables
 

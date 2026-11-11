@@ -18,6 +18,14 @@ path = "src/lib.rs"
 name = "vta-agent-memory"
 path = "src/main.rs"
 
+# The memory quality evaluation (#35): scripted scenarios under
+# `tests/eval/scenarios/`, scored, with a markdown report. Its own `main` so it
+# can print that report and fail on a hard check — `cargo test --test eval`.
+[[test]]
+name = "eval"
+path = "tests/eval.rs"
+harness = false
+
 [dependencies]
 # The whole reason this repo is thin: `VtaClient`'s memory methods
 # already drive `vta/memory/*` through the generic Trust-Task dispatcher, which
