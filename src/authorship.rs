@@ -32,6 +32,24 @@
 //! (`v` ≥ 2) but carries no proof is refused, so stripping a signature does not
 //! downgrade a record to merely unattributed.
 //!
+//! # Imported records (#36)
+//!
+//! A record carried to another context by `import` cannot keep its original
+//! signature as its own: that signature names the context it was exported
+//! from, which is exactly the relocation rule 3 refuses. Re-signing it as the
+//! importer would keep it readable but lose who wrote it. So the importer signs
+//! a record for where it now is, and carries the original — verbatim, with the
+//! original author's proof — in `importedFrom`. A reader checks both
+//! signatures, checks that the original was written under the same key, and
+//! checks that its content (everything but the authorship, location and
+//! history fields) is the content of the record found. The memory is then
+//! attributed to its **original** author, and says who imported it from where.
+//!
+//! The importer cannot change the content without failing that comparison, and
+//! cannot invent an original without the original author's key. What it can
+//! do is import a memory the original author has since retracted — the bundle
+//! is a snapshot — which is why the imported record says when and from where.
+//!
 //! # Verification does no I/O
 //!
 //! The resolver is `did:key`-only ([`TrustTaskVmResolver::did_key_only`]): the
@@ -124,6 +142,11 @@ impl Signer {
         self.key.holder_did()
     }
 
+    /// The key itself, for signing something other than a record (a bundle).
+    pub(crate) fn holder_key(&self) -> &HolderKey {
+        &self.key
+    }
+
     /// The kind of author this signer writes as.
     pub fn kind(&self) -> AuthorKind {
         self.kind
@@ -169,13 +192,35 @@ pub enum Authorship {
         /// Whether the author is the identity this process signs as — "I wrote
         /// this" rather than "another writer on this context did".
         by_this_agent: bool,
+        /// Set when the record was carried here by `import`: `author` is then
+        /// the original author, and this says who imported it from where.
+        imported: Option<Imported>,
     },
     /// Written before records were signed, or by something that does not sign.
     /// Readable, but nothing vouches for who wrote it.
     Unattributed,
 }
 
+/// Who carried an imported record into this context, and from where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Imported {
+    /// The DID that signed the record here — the importer.
+    pub by: String,
+    /// The context the original author wrote it in.
+    pub from_context: String,
+}
+
 impl Authorship {
+    /// A record whose signature holds and that was not imported.
+    pub fn verified(author: impl Into<String>, kind: Option<AuthorKind>, mine: bool) -> Self {
+        Authorship::Verified {
+            author: author.into(),
+            kind,
+            by_this_agent: mine,
+            imported: None,
+        }
+    }
+
     /// The `author` block recall and get return.
     pub fn to_json(&self) -> Value {
         match self {
@@ -183,12 +228,20 @@ impl Authorship {
                 author,
                 kind,
                 by_this_agent,
-            } => serde_json::json!({
-                "status": "verified",
-                "did": author,
-                "kind": kind.map(|k| k.as_str()).unwrap_or("unknown"),
-                "thisAgent": by_this_agent,
-            }),
+                imported,
+            } => {
+                let mut v = serde_json::json!({
+                    "status": "verified",
+                    "did": author,
+                    "kind": kind.map(|k| k.as_str()).unwrap_or("unknown"),
+                    "thisAgent": by_this_agent,
+                });
+                if let Some(i) = imported {
+                    v["importedBy"] = Value::String(i.by.clone());
+                    v["importedFrom"] = Value::String(i.from_context.clone());
+                }
+                v
+            }
             Authorship::Unattributed => serde_json::json!({ "status": "unattributed" }),
         }
     }
@@ -198,14 +251,31 @@ impl Authorship {
     pub fn note(&self) -> Option<String> {
         match self {
             Authorship::Verified {
-                by_this_agent: true,
-                ..
-            } => None,
-            Authorship::Verified { author, kind, .. } => Some(format!(
-                "written by {} {}",
-                kind.map(|k| k.as_str()).unwrap_or("writer"),
-                abbreviate_did(author)
-            )),
+                author,
+                kind,
+                by_this_agent,
+                imported,
+            } => {
+                let written = (!by_this_agent).then(|| {
+                    format!(
+                        "written by {} {}",
+                        kind.map(|k| k.as_str()).unwrap_or("writer"),
+                        abbreviate_did(author)
+                    )
+                });
+                let carried = imported.as_ref().map(|i| {
+                    format!(
+                        "imported from context `{}`",
+                        crate::fence::Fence::sanitize(&clip(&i.from_context))
+                    )
+                });
+                match (written, carried) {
+                    (None, None) => None,
+                    (Some(w), None) => Some(w),
+                    (None, Some(c)) => Some(c),
+                    (Some(w), Some(c)) => Some(format!("{w}, {c}")),
+                }
+            }
             Authorship::Unattributed => Some("unattributed".to_string()),
         }
     }
@@ -257,11 +327,48 @@ pub async fn verify(
         return Ok(Authorship::Unattributed);
     }
 
+    let (signer, kind) = check_signature(&raw).await?;
+    let field = |name: &str| obj.get(name).and_then(Value::as_str);
+    let (signed_context, signed_key) = (field("contextId"), field("key"));
+    if signed_context != Some(context_id) || signed_key != Some(key) {
+        return Err(format!(
+            "it was signed for `{}` in context `{}`, not where it was found — it was copied or \
+             moved here",
+            clip(signed_key.unwrap_or("<none>")),
+            clip(signed_context.unwrap_or("<none>")),
+        ));
+    }
+
+    let Some(origin) = obj.get("importedFrom") else {
+        return Ok(Authorship::Verified {
+            by_this_agent: own_did == Some(signer.as_str()),
+            kind,
+            author: signer,
+            imported: None,
+        });
+    };
+    let (author, kind, from_context) = check_origin(origin, &raw, key)
+        .await
+        .map_err(|why| format!("it was imported by {}, but {why}", clip(&signer)))?;
+    Ok(Authorship::Verified {
+        by_this_agent: own_did == Some(author.as_str()),
+        kind,
+        author,
+        imported: Some(Imported {
+            by: signer,
+            from_context,
+        }),
+    })
+}
+
+/// Check a signed object's proof and that its `author` is who signed it:
+/// the signer's DID and the kind it stated.
+async fn check_signature(raw: &Value) -> Result<(String, Option<AuthorKind>), String> {
     // Verified over the value exactly as stored, not a re-serialisation of the
     // decoded struct: a field this version does not know is still signed, and
     // dropping it would fail a record a newer writer made correctly.
     let signer = verify_proof_set(
-        &raw,
+        raw,
         ProofPurpose::AssertionMethod,
         &TrustTaskVmResolver::did_key_only(),
     )
@@ -271,7 +378,7 @@ pub async fn verify(
     })?
     .into_signer();
 
-    let field = |name: &str| obj.get(name).and_then(Value::as_str);
+    let field = |name: &str| raw.get(name).and_then(Value::as_str);
     match field("author") {
         Some(author) if author == signer => {}
         Some(author) => {
@@ -288,21 +395,68 @@ pub async fn verify(
             ));
         }
     }
-    let (signed_context, signed_key) = (field("contextId"), field("key"));
-    if signed_context != Some(context_id) || signed_key != Some(key) {
+    Ok((signer, field("authorKind").and_then(AuthorKind::parse)))
+}
+
+/// Check the original an imported record carries: signed by its own author,
+/// written under the same key, and with the same content as the record found.
+/// The original author's DID, kind, and the context the original names.
+async fn check_origin(
+    origin: &Value,
+    found: &Value,
+    key: &str,
+) -> Result<(String, Option<AuthorKind>, String), String> {
+    let Some(obj) = origin.as_object() else {
+        return Err("the original it carries is not a record".to_string());
+    };
+    if !obj.contains_key("proof") {
+        return Err("the original it carries is not signed".to_string());
+    }
+    if obj.contains_key("importedFrom") {
+        // `import` flattens: a re-imported record carries the first original.
+        return Err("the original it carries is itself an import".to_string());
+    }
+    let (author, kind) = check_signature(origin)
+        .await
+        .map_err(|why| format!("the original it carries is refused: {why}"))?;
+    let field = |name: &str| obj.get(name).and_then(Value::as_str);
+    if field("key") != Some(key) {
         return Err(format!(
-            "it was signed for `{}` in context `{}`, not where it was found — it was copied or \
-             moved here",
-            clip(signed_key.unwrap_or("<none>")),
-            clip(signed_context.unwrap_or("<none>")),
+            "the original it carries was written as `{}`, not `{}`",
+            clip(field("key").unwrap_or("<none>")),
+            clip(key)
         ));
     }
+    let Some(from_context) = field("contextId") else {
+        return Err("the original it carries names no context".to_string());
+    };
+    if content(origin)? != content(found)? {
+        return Err(
+            "its content differs from the original it carries — it was changed on import"
+                .to_string(),
+        );
+    }
+    Ok((author, kind, from_context.to_string()))
+}
 
-    Ok(Authorship::Verified {
-        by_this_agent: own_did == Some(signer.as_str()),
-        kind: field("authorKind").and_then(AuthorKind::parse),
-        author: signer,
-    })
+/// A record's content: everything but who signed it, where, what it replaced,
+/// and the import that brought it — the fields that legitimately differ
+/// between an original and its import.
+///
+/// Compared through [`MemoryRecord`], so a field this version does not know is
+/// ignored on both sides rather than failing a record a newer writer made.
+fn content(record: &Value) -> Result<Value, String> {
+    let mut r: MemoryRecord = serde_json::from_value(record.clone())
+        .map_err(|e| format!("a record it carries is not a memory record ({e})"))?;
+    r.v = 0;
+    r.author = None;
+    r.author_kind = None;
+    r.context_id = None;
+    r.key = None;
+    r.proof = None;
+    r.supersedes = None;
+    r.imported_from = None;
+    serde_json::to_value(&r).map_err(|e| e.to_string())
 }
 
 /// A string taken from a refused record, cut short for its refusal reason.

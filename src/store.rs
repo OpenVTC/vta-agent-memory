@@ -71,7 +71,7 @@ use vta_sdk::specs::vta::memory::{
     put::v0_3 as put_spec,
 };
 
-use crate::authorship::{Refused, Signer, verify};
+use crate::authorship::{Authorship, Refused, Signer, verify};
 use crate::lifecycle::{self, Standing, Status};
 use crate::record::{Entry, Hit, MemoryKey, MemoryRecord, MemoryType, rank};
 
@@ -233,6 +233,19 @@ impl Store {
         record: &MemoryRecord,
         expected: Option<u64>,
     ) -> anyhow::Result<SaveOutcome> {
+        // Whoever saves is the author from now on, so an import's original no
+        // longer describes this record (and would not match it).
+        let mut record = record.clone();
+        record.imported_from = None;
+        self.write_versioned(&record, expected).await
+    }
+
+    /// [`save_versioned`](Self::save_versioned), keeping `importedFrom`.
+    async fn write_versioned(
+        &self,
+        record: &MemoryRecord,
+        expected: Option<u64>,
+    ) -> anyhow::Result<SaveOutcome> {
         let key = MemoryKey::new(record.kind, &record.name)?;
         let key_str = key.to_string();
         let signer = self.signer.as_ref().ok_or_else(|| {
@@ -366,6 +379,60 @@ impl Store {
         record.status_reason = Some(reason.to_string());
         self.save_versioned(&record, Some(expected.unwrap_or(version)))
             .await
+    }
+
+    /// Every memory a bundle can carry that `filter` selects, verbatim as
+    /// stored, and every one it cannot, with why. Refused and unattributed
+    /// records cannot be carried: neither has an author a receiver could check.
+    pub async fn exportable(
+        &self,
+        filter: &crate::bundle::Filter,
+    ) -> anyhow::Result<(Vec<crate::bundle::Item>, Vec<Refused>)> {
+        let mut items = Vec::new();
+        let mut left_out = Vec::new();
+        for (raw, value, version) in self.raw_list("").await? {
+            let Ok(key) = MemoryKey::parse(&raw) else {
+                continue; // history, or another tool's entry
+            };
+            match self.check(key.clone(), &value, version).await {
+                Err(refused) => left_out.push(refused),
+                Ok(entry) if entry.authorship == Authorship::Unattributed => {
+                    left_out.push(Refused {
+                        key: raw,
+                        reason: "it is unattributed (written before records were signed); \
+                                 saving it again signs it"
+                            .to_string(),
+                    })
+                }
+                Ok(entry) if !filter.matches(&entry.record) => {}
+                Ok(_) => items.push(crate::bundle::Item {
+                    key,
+                    version,
+                    record: serde_json::from_str(&value)
+                        .context("a signed record that is not JSON")?,
+                }),
+            }
+        }
+        Ok((items, left_out))
+    }
+
+    /// Write one memory from a bundle, attributed to its original author.
+    ///
+    /// The record is signed by this store for where it now is, and carries the
+    /// original verbatim as `importedFrom`, which a reader checks it against
+    /// (see [`crate::authorship`]). Without `replace` a memory already under
+    /// the key is left alone, and the outcome is a [`SaveOutcome::Conflict`];
+    /// with it, the import is a new version and the old one goes to history.
+    pub async fn import(
+        &self,
+        memory: &crate::bundle::Memory,
+        replace: bool,
+    ) -> anyhow::Result<SaveOutcome> {
+        let mut record = memory.record.clone();
+        // Its history is in the context it came from.
+        record.supersedes = None;
+        record.imported_from = Some(memory.origin.clone());
+        self.write_versioned(&record, (!replace).then_some(0)).await
     }
 
     /// Earlier versions of `key`, newest first, each checked against the key

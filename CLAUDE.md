@@ -24,7 +24,7 @@ src/
   enrol.rs     two-phase enrolment (init/connect) — the primary path
   pnm.rs       resolving which VTA, and where its pnm session actually lives
   lazy.rs      connect on first use, so the server exists when the VTA doesn't
-  main.rs      CLI: serve | setup | recall | list | forget | doctor
+  main.rs      CLI: serve | setup | recall | list | forget | export | import | doctor
   setup.rs     the online provisioning flow
   config.rs    ~/.config/vta-agent-memory/config.json (0600)
   store.rs     typed ops over vta/memory/* — the only VTA-facing code
@@ -32,10 +32,12 @@ src/
   authorship.rs  signing records on save, verifying author + location on read
   provenance.rs  basis / confidence / evidence: vocabulary, checks, rank weight
   lifecycle.rs   status, validUntil/reviewAfter, history keys, standing
+  bundle.rs      the signed export/import bundle (docs/memory-bundle.md)
   server.rs    the nine MCP tools
 tests/
   common/                    the in-process fake VTA + signers, shared
   memory_roundtrip.rs        Store end-to-end against an in-process fake VTA
+  bundle.rs                  export -> import, and tampered bundles refused
   eval.rs, eval/scenarios/   memory quality evaluation — scored scenarios
   mcp_starts_without_a_vta.rs  the real binary, over stdio, with no VTA
   hook_contract.rs           the SessionStart hook's contract
@@ -182,6 +184,16 @@ must stay outside every `<type>/` prefix, and `forget` must delete them: "forget
 has to mean forget. A status change is a new version signed by whoever made it;
 only `retract` is allowed on a refused record, because anything else would
 re-sign content nobody vouches for.
+
+**An import keeps the original author, verifiably.** A record's signature names
+the context it was written in, so an imported record is signed by the importer
+for where it now is and carries the original verbatim in `importedFrom`;
+`authorship::verify` checks both proofs, the key, and that the content is the
+same, then attributes the memory to the original author. Do not "simplify" this
+by relaxing the location check for imports, or by re-signing as the importer —
+the first lets any record be relocated, the second loses who wrote it. Any
+later save drops `importedFrom` (`Store::save_versioned`); only `Store::import`
+writes it. Opening a bundle is all or nothing.
 
 ## The retrieval constraint
 

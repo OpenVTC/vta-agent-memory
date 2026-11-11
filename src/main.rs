@@ -25,6 +25,7 @@ use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
 use vta_agent_memory::authorship::Refused;
+use vta_agent_memory::bundle::{self, Filter};
 use vta_agent_memory::config::{ALLOW_OPERATOR_LOGIN_ENV, Config, operator_login_allowed_by_env};
 use vta_agent_memory::fence::{Fence, Provenance};
 use vta_agent_memory::record::{self, MemoryKey, MemoryType};
@@ -152,8 +153,55 @@ enum Command {
         key: String,
     },
 
+    /// Write a signed bundle of this context's memories — to carry to another
+    /// context or VTA, or to keep. Format: `docs/memory-bundle.md`.
+    Export {
+        /// Where to write it. Omit for stdout.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+
+    /// Verify a bundle and save its memories here, attributed to whoever
+    /// originally wrote them. A bundle that fails any check is refused whole.
+    Import {
+        /// The bundle file, or `-` for stdin.
+        file: PathBuf,
+        /// Replace memories already here under the same key (the replaced
+        /// version is kept in history). Without it they are left alone.
+        #[arg(long)]
+        replace: bool,
+        /// Verify and report what would be imported, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+
     /// Check the configured connection and context access.
     Doctor,
+}
+
+/// Which memories `export` or `import` carries. Each option narrows, repeats
+/// or takes a comma-separated list, and is ignored when absent.
+#[derive(clap::Args, Debug)]
+struct FilterArgs {
+    /// Memory types: user, feedback, project, reference.
+    #[arg(long = "type", value_name = "TYPE")]
+    types: Vec<String>,
+    /// Bases: declared, observed, verified, inferred, unstated.
+    #[arg(long, value_name = "BASIS")]
+    basis: Vec<String>,
+    /// Statuses: active, deprecated, disputed, retracted.
+    #[arg(long, value_name = "STATUS")]
+    status: Vec<String>,
+}
+
+impl FilterArgs {
+    fn parse(&self) -> anyhow::Result<Filter> {
+        Filter::parse(&self.types, &self.basis, &self.status).map_err(|e| anyhow::anyhow!(e))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -246,6 +294,13 @@ async fn main() -> anyhow::Result<()> {
         } => recall(&config_path, query, kind, limit, format, full).await,
         Command::List { kind } => list(&config_path, kind).await,
         Command::Forget { key } => forget(&config_path, &key).await,
+        Command::Export { out, filter } => export(&config_path, out, &filter).await,
+        Command::Import {
+            file,
+            replace,
+            dry_run,
+            filter,
+        } => import(&config_path, &file, replace, dry_run, &filter).await,
         Command::Doctor => doctor(&config_path).await,
     }
 }
@@ -391,6 +446,146 @@ async fn forget(config_path: &std::path::Path, key: &str) -> anyhow::Result<()> 
     let result = store.forget(&parsed).await;
     finish(store, result).await?;
     println!("Forgot {parsed}.");
+    Ok(())
+}
+
+async fn export(
+    config_path: &std::path::Path,
+    out: Option<PathBuf>,
+    filter: &FilterArgs,
+) -> anyhow::Result<()> {
+    let filter = filter.parse()?;
+    let (cfg, store) = open(config_path).await?;
+    let result = async {
+        let (items, left_out) = store.exportable(&filter).await?;
+        let signer = store
+            .signer()
+            .ok_or_else(|| anyhow::anyhow!("no signing key to sign the bundle with"))?;
+        let sealed = bundle::seal(signer, &cfg.context_id, &filter, &items).await?;
+        Ok::<_, anyhow::Error>((sealed, items.len(), left_out))
+    }
+    .await;
+    let (sealed, count, left_out) = finish(store, result).await?;
+
+    let text = serde_json::to_string_pretty(&sealed)?;
+    match &out {
+        Some(path) => write_private(path, &text)?,
+        None => println!("{text}"),
+    }
+    // The report goes to stderr: stdout may be the bundle.
+    eprintln!(
+        "Exported {count} memor{} from context `{}`{}.",
+        if count == 1 { "y" } else { "ies" },
+        cfg.context_id,
+        out.as_ref()
+            .map(|p| format!(" to {}", p.display()))
+            .unwrap_or_default()
+    );
+    if !left_out.is_empty() {
+        eprintln!("Left out {}:", left_out.len());
+        for r in &left_out {
+            eprintln!("  {} — {}", r.key, r.reason);
+        }
+    }
+    Ok(())
+}
+
+/// Write `text` to `path` readable by its owner alone: a bundle is the user's
+/// memories, which are not for every account on the machine.
+fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+    file.write_all(text.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+async fn import(
+    config_path: &std::path::Path,
+    file: &std::path::Path,
+    replace: bool,
+    dry_run: bool,
+    filter: &FilterArgs,
+) -> anyhow::Result<()> {
+    let filter = filter.parse()?;
+    let raw = if file.as_os_str() == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        s
+    } else {
+        std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", file.display()))?
+    };
+    // Checked before connecting: a bundle that does not verify needs no VTA
+    // to say so.
+    let opened = bundle::open(&raw)
+        .await
+        .map_err(|why| anyhow::anyhow!("the bundle is refused, and nothing was imported: {why}"))?;
+    let chosen: Vec<_> = opened
+        .memories
+        .iter()
+        .filter(|m| filter.matches(&m.record))
+        .collect();
+    println!(
+        "Bundle from context `{}`, exported by {} at {}: {} memor{}, all signatures valid.",
+        opened.source_context,
+        opened.exported_by,
+        opened.exported_at,
+        opened.memories.len(),
+        if opened.memories.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+    );
+    if dry_run {
+        for m in &chosen {
+            println!("  would import {}", m.key);
+        }
+        return Ok(());
+    }
+
+    let (cfg, store) = open(config_path).await?;
+    let result = async {
+        let mut report = Vec::new();
+        for m in &chosen {
+            let outcome = store.import(m, replace).await?;
+            report.push((m.key.to_string(), outcome));
+        }
+        Ok::<_, anyhow::Error>(report)
+    }
+    .await;
+    let report = finish(store, result).await?;
+
+    let mut imported = 0;
+    for (key, outcome) in &report {
+        match outcome {
+            vta_agent_memory::store::SaveOutcome::Saved { .. } => {
+                imported += 1;
+                println!("  imported {key}");
+            }
+            vta_agent_memory::store::SaveOutcome::Conflict { .. } if replace => {
+                println!("  skipped  {key} — another writer changed it while importing");
+            }
+            vta_agent_memory::store::SaveOutcome::Conflict { .. } => {
+                println!("  skipped  {key} — already here (`--replace` replaces it)");
+            }
+        }
+    }
+    println!(
+        "Imported {imported} of {} into context `{}`.",
+        chosen.len(),
+        cfg.context_id
+    );
     Ok(())
 }
 
@@ -696,6 +891,7 @@ mod tests {
                 author: "did:key:z6MkMine".into(),
                 kind: Some(AuthorKind::Agent),
                 by_this_agent: true,
+                imported: None,
             },
             ..entry(MemoryType::User, "Mine", "written here", "")
         };
@@ -704,6 +900,7 @@ mod tests {
                 author: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into(),
                 kind: Some(AuthorKind::Operator),
                 by_this_agent: false,
+                imported: None,
             },
             ..entry(MemoryType::User, "Theirs", "written elsewhere", "")
         };
