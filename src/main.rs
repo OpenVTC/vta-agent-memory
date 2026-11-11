@@ -179,8 +179,38 @@ enum Command {
         filter: FilterArgs,
     },
 
+    /// The Data Rooms recall also reads. Read only: recall never writes to a
+    /// room.
+    Rooms {
+        #[command(subcommand)]
+        action: RoomsAction,
+    },
+
     /// Check the configured connection and context access.
     Doctor,
+}
+
+#[derive(Subcommand, Debug)]
+enum RoomsAction {
+    /// Have recall read a room. Your VTA must hold the room for you.
+    Add {
+        /// The room's DID.
+        #[arg(long, value_name = "DID")]
+        room: String,
+        /// The host's DID, which the records are read from.
+        #[arg(long, value_name = "DID")]
+        host: String,
+        /// Which member to read as, if your VTA holds the room for more than one.
+        #[arg(long, value_name = "DID")]
+        member: Option<String>,
+        /// A short name for the room, usable in `sources`.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Stop reading a room, by its DID or label.
+    Remove { room: String },
+    /// Print the rooms recall reads.
+    List,
 }
 
 /// Which memories `export` or `import` carries. Each option narrows, repeats
@@ -301,6 +331,7 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             filter,
         } => import(&config_path, &file, replace, dry_run, &filter).await,
+        Command::Rooms { action } => rooms(&config_path, action),
         Command::Doctor => doctor(&config_path).await,
     }
 }
@@ -589,6 +620,68 @@ async fn import(
     Ok(())
 }
 
+fn rooms(config_path: &std::path::Path, action: RoomsAction) -> anyhow::Result<()> {
+    let mut cfg = Config::load(config_path)?;
+    match action {
+        RoomsAction::Add {
+            room,
+            host,
+            member,
+            label,
+        } => {
+            if !room.starts_with("did:") || !host.starts_with("did:") {
+                anyhow::bail!("`--room` and `--host` are DIDs");
+            }
+            if cfg
+                .rooms
+                .iter()
+                .any(|r| r.room_id == room || (label.is_some() && r.label == label))
+            {
+                anyhow::bail!("that room, or that label, is already configured");
+            }
+            cfg.rooms.push(vta_agent_memory::rooms::RoomSource {
+                room_id: room.clone(),
+                host,
+                member,
+                label,
+            });
+            cfg.save(config_path)?;
+            println!("Recall now reads room {room}. `doctor` checks it can be read.");
+        }
+        RoomsAction::Remove { room } => {
+            let before = cfg.rooms.len();
+            cfg.rooms
+                .retain(|r| r.room_id != room && r.label.as_deref() != Some(room.as_str()));
+            if cfg.rooms.len() == before {
+                anyhow::bail!("no configured room `{room}`");
+            }
+            cfg.save(config_path)?;
+            println!("Recall no longer reads {room}.");
+        }
+        RoomsAction::List => {
+            if cfg.rooms.is_empty() {
+                println!("No rooms: recall reads personal memory only.");
+            }
+            for r in &cfg.rooms {
+                println!(
+                    "{}{}  host {}{}",
+                    r.room_id,
+                    r.label
+                        .as_ref()
+                        .map(|l| format!(" ({l})"))
+                        .unwrap_or_default(),
+                    r.host,
+                    r.member
+                        .as_ref()
+                        .map(|m| format!("  as {m}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn doctor(config_path: &std::path::Path) -> anyhow::Result<()> {
     let cfg = Config::load(config_path)?;
     println!("config      {}", config_path.display());
@@ -617,6 +710,24 @@ async fn doctor(config_path: &std::path::Path) -> anyhow::Result<()> {
         .with_purpose(cfg.purpose())
         .with_signer(signer);
     let result = store.list().await;
+    if result.is_ok() && !cfg.rooms.is_empty() {
+        let sources = vta_agent_memory::rooms::Sources {
+            personal: false,
+            rooms: cfg.rooms.clone(),
+        };
+        let resolver = vta_agent_memory::rooms::resolver_for(&sources).await;
+        for room in &cfg.rooms {
+            let name = room.label.as_deref().unwrap_or(&room.room_id);
+            match vta_agent_memory::rooms::read_room(store.client(), room, &resolver).await {
+                Ok(read) => println!(
+                    "room        {name}: {} recallable, {} refused",
+                    read.records.len(),
+                    read.refused.len()
+                ),
+                Err(e) => println!("room        {name}: unavailable — {e:#}"),
+            }
+        }
+    }
     match finish(store, result).await {
         Ok(listing) => {
             let unattributed = listing

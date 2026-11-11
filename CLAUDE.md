@@ -24,7 +24,7 @@ src/
   enrol.rs     two-phase enrolment (init/connect) — the primary path
   pnm.rs       resolving which VTA, and where its pnm session actually lives
   lazy.rs      connect on first use, so the server exists when the VTA doesn't
-  main.rs      CLI: serve | setup | recall | list | forget | export | import | doctor
+  main.rs      CLI: serve | setup | recall | list | forget | export | import | rooms | doctor
   setup.rs     the online provisioning flow
   config.rs    ~/.config/vta-agent-memory/config.json (0600)
   store.rs     typed ops over vta/memory/* — the only VTA-facing code
@@ -33,11 +33,13 @@ src/
   provenance.rs  basis / confidence / evidence: vocabulary, checks, rank weight
   lifecycle.rs   status, validUntil/reviewAfter, history keys, standing
   bundle.rs      the signed export/import bundle (docs/memory-bundle.md)
+  rooms.rs       recall across Data Rooms: read, verify the in-body signature, rank
   server.rs    the nine MCP tools
 tests/
   common/                    the in-process fake VTA + signers, shared
   memory_roundtrip.rs        Store end-to-end against an in-process fake VTA
   bundle.rs                  export -> import, and tampered bundles refused
+  rooms_recall.rs            recall across memory + rooms; bad room signatures refused
   eval.rs, eval/scenarios/   memory quality evaluation — scored scenarios
   mcp_starts_without_a_vta.rs  the real binary, over stdio, with no VTA
   hook_contract.rs           the SessionStart hook's contract
@@ -194,6 +196,17 @@ by relaxing the location check for imports, or by re-signing as the importer —
 the first lets any record be relocated, the second loses who wrote it. Any
 later save drops `importedFrom` (`Store::save_versioned`); only `Store::import`
 writes it. Opening a bundle is all or nothing.
+
+**Room records are checked here, not by the VTA.** `rooms/keys/read` reports
+what the VTA checked about the *host*; the author's in-body signature is the
+reader's (`rooms::verify_body`, the rules of `vtc_client`'s
+`verify_record_body`). Verify the location at the *sealed* version
+(`ext.org.openvtc.rooms.sealedAt`), not the record's own: a curation moves the
+version past the body. Do the location and host-author checks before
+resolving the author. Room records may be verified with a network resolver
+(members are often `did:webvh`); personal records stay `did:key`-only. Recall
+never writes to a room, and the session-start hook does not read rooms: a slow
+host must not delay a session.
 
 ## The retrieval constraint
 

@@ -267,6 +267,21 @@ reason) or `retracted` (a tombstone that never recalls) — plus `validUntil`
 the "this was wrong" path; `forget` is still the hard delete, and takes the
 history with it.
 
+**Recall reaches the Data Rooms you belong to, read-only.** `vta-agent-memory
+rooms add --room <did> --host <did> [--label L]` adds a room for recall to search.
+`memory_recall` then searches personal memory and those rooms together and ranks
+them on one scale. Every result says where it came from (`source`), who wrote it,
+its status and its basis. A sealed room record's in-body signature is checked
+the same way `pnm rooms read` checks it: the signature must hold, the author must
+be the signer, the record must be at the room, key and version it was signed for,
+and the author must match the one the host recorded. A record that fails any of
+these is left out and reported in `refused`. An open room's records carry no such
+signature and are marked `hostReported`. Deprecated room records rank lower;
+retracted and expired ones are left out. A room that can't be read is listed as
+`unavailable`, and recall carries on without it. `sources` narrows where recall
+looks. Recall never writes to a room. The session-start hook still reads
+personal memory only, so starting a session never waits on a room's host.
+
 **Memories can leave the VTA without losing who wrote them.** `export` writes a
 signed bundle of a context's memories — optionally narrowed by `--type`,
 `--basis` or `--status` — with each record's own author signature intact and the
@@ -294,6 +309,7 @@ vta-agent-memory list [--type T]
 vta-agent-memory forget <key>
 vta-agent-memory export [--out FILE] [--type T] [--basis B] [--status S]
 vta-agent-memory import FILE|- [--replace] [--dry-run] [--type T] [--basis B] [--status S]
+vta-agent-memory rooms add --room DID --host DID [--member DID] [--label L] | remove ROOM | list
 vta-agent-memory doctor
 ```
 

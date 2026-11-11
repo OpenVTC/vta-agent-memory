@@ -20,6 +20,7 @@ pub mod lifecycle;
 pub mod pnm;
 pub mod provenance;
 pub mod record;
+pub mod rooms;
 pub mod server;
 pub mod setup;
 pub mod store;

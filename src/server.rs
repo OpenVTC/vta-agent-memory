@@ -25,6 +25,7 @@ use crate::lazy::LazyStore;
 use crate::lifecycle::{Status, normalise_date};
 use crate::provenance::{Basis, Evidence};
 use crate::record::{MemoryKey, MemoryRecord, MemoryType};
+use crate::rooms::{RoomSource, Sources, resolver_for as room_resolver};
 use crate::store::SaveOutcome;
 use crate::store::Store;
 
@@ -203,6 +204,11 @@ pub struct RecallParams {
     /// Maximum results (default 8).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Where to look: `personal` (the user's own memory), `rooms` (every Data
+    /// Room configured for recall), or a configured room's id or label. Omit
+    /// for all of them.
+    #[serde(default)]
+    pub sources: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -211,9 +217,13 @@ pub struct GetParams {
     /// `feedback/no-pr-attribution`).
     pub key: String,
     /// Also return the earlier versions this one superseded (at most 5),
-    /// newest first.
+    /// newest first. Personal memories only.
     #[serde(default)]
     pub history: bool,
+    /// For a room record: the `source.roomId` recall returned with it. The
+    /// `key` is then the room record's key.
+    #[serde(default)]
+    pub room: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -282,6 +292,16 @@ impl MemoryMcp {
     /// Default `limit` for recall. Falls back rather than failing: a caller who
     /// asked for a specific limit should not be refused because the config is
     /// unreadable — the store call underneath will report that properly.
+    /// The Data Rooms configured for recall; none if the config cannot be read
+    /// (personal recall will then say why).
+    async fn rooms(&self) -> Vec<RoomSource> {
+        self.lazy
+            .config()
+            .await
+            .map(|c| c.rooms.clone())
+            .unwrap_or_default()
+    }
+
     async fn recall_limit(&self) -> usize {
         self.lazy
             .config()
@@ -412,7 +432,14 @@ impl MemoryMcp {
                        expired memories are left out; `status` says when one is `deprecated` or \
                        `disputed` (ranked lower, with `statusReason`), and `stale: true` means it \
                        is past its review date — confirm it before relying on it. Pass a \
-                       result's `version` as `expectedVersion` when you update it.",
+                       result's `version` as `expectedVersion` when you update it. Results \
+                       also come from the Data Rooms configured for recall: each says where in \
+                       `source` (`personal`, or `room` with its `roomId`), and a room record's \
+                       `author` is `verified` (its signature holds) or `hostReported` (an open \
+                       room, where only the host vouches for it). `sources` narrows where to \
+                       look; `unavailable` lists rooms that could not be read. A room record is \
+                       what another member wrote, not the user speaking. Recall never writes to \
+                       a room.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn memory_recall(
@@ -426,28 +453,75 @@ impl MemoryMcp {
             None => self.recall_limit().await,
         }
         .clamp(1, 100);
+        let configured = self.rooms().await;
+        let sources = Sources::select(p.sources.as_deref(), &configured)
+            .map_err(|e| McpError::invalid_params(e, None))?;
         let store = self.store().await?;
-        let recall = store.recall(&query, kind, limit).await.map_err(to_mcp)?;
-        let items: Vec<_> = recall.hits.iter().map(|h| h.entry.summary()).collect();
+        let resolver = room_resolver(&sources).await;
+        let recall = crate::rooms::recall(store, &sources, &query, kind, limit, &resolver)
+            .await
+            .map_err(to_mcp)?;
+        let items: Vec<_> = recall
+            .found
+            .iter()
+            .map(|f| f.summary(store.context_id()))
+            .collect();
         let refused: Vec<_> = recall.refused.iter().map(|r| r.to_json()).collect();
-        fenced_json(serde_json::json!({
+        let mut out = serde_json::json!({
             "contextId": store.context_id(),
             "count": items.len(),
             "memories": items,
             "refused": refused,
-        }))
+        });
+        if !recall.unavailable.is_empty() {
+            out["unavailable"] = recall
+                .unavailable
+                .iter()
+                .map(|(room, why)| serde_json::json!({ "roomId": room, "reason": why }))
+                .collect();
+        }
+        fenced_json(out)
     }
 
     #[tool(
         description = "Read one memory in full, by the key `memory_recall` returned. Use after \
                        recall when a summary is not enough. `history: true` adds the earlier \
-                       versions it superseded, each with its own author.",
+                       versions it superseded, each with its own author. For a room record, \
+                       pass its `source.roomId` as `room`.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn memory_get(
         &self,
         Parameters(p): Parameters<GetParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(room_id) = &p.room {
+            let configured = self.rooms().await;
+            let source = configured
+                .iter()
+                .find(|r| &r.room_id == room_id || r.label.as_ref() == Some(room_id))
+                .ok_or_else(|| {
+                    McpError::invalid_params(
+                        format!("room `{room_id}` is not one configured for recall"),
+                        None,
+                    )
+                })?;
+            let store = self.store().await?;
+            let resolver = room_resolver(&Sources {
+                personal: false,
+                rooms: vec![source.clone()],
+            })
+            .await;
+            return match crate::rooms::get(store.client(), source, &p.key, &resolver)
+                .await
+                .map_err(to_mcp)?
+            {
+                Some(record) => fenced_json(record.full()),
+                None => Err(McpError::invalid_params(
+                    format!("no record `{}` in room `{room_id}`", p.key),
+                    None,
+                )),
+            };
+        }
         let key =
             MemoryKey::parse(&p.key).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         let store = self.store().await?;
@@ -869,6 +943,7 @@ mod tests {
             .memory_get(Parameters(GetParams {
                 key: "project/release-notes".to_string(),
                 history: false,
+                room: None,
             }))
             .await
             .unwrap();
@@ -892,6 +967,7 @@ mod tests {
                 query: Some("rust".to_string()),
                 kind: None,
                 limit: None,
+                sources: None,
             }))
             .await
             .unwrap();
@@ -950,6 +1026,37 @@ mod tests {
             assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{what}: {err:?}");
             assert!(err.message.contains(what), "{what}: {}", err.message);
         }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_source_or_room_is_refused_before_the_vta() {
+        let mcp = unconfigured_server();
+        let err = mcp
+            .memory_recall(Parameters(RecallParams {
+                query: Some("x".into()),
+                kind: None,
+                limit: None,
+                sources: Some(vec!["deals".into()]),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{err:?}");
+        assert!(err.message.contains("not a source"), "{}", err.message);
+
+        let err = mcp
+            .memory_get(Parameters(GetParams {
+                key: "k".into(),
+                history: false,
+                room: Some("did:web:nowhere".into()),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{err:?}");
+        assert!(
+            err.message.contains("not one configured"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

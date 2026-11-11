@@ -679,7 +679,7 @@ fn words(s: &str) -> std::collections::HashSet<String> {
 
 /// The terms a query is matched on: its words, less [`STOPWORDS`] and
 /// single characters, each once.
-fn query_terms(query: &str) -> Vec<String> {
+pub fn query_terms(query: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     for t in tokens(query) {
         if t.chars().count() > 1 && !STOPWORDS.contains(&t.as_str()) && !terms.contains(&t) {
@@ -715,6 +715,33 @@ fn singular(w: &str) -> String {
     w.to_string()
 }
 
+/// How well a record's `name`, `description` and `body` match `terms`
+/// (from [`query_terms`]): name 4, description 2, body 1, per term. Zero for
+/// no terms. Shared with room records (`crate::rooms`), so a memory and a room
+/// record that match a query equally well score equally before their weights.
+pub fn relevance(terms: &[String], name: &str, description: &str, body: &str) -> u32 {
+    if terms.is_empty() {
+        return 0;
+    }
+    let (name, desc, body) = (words(name), words(description), words(body));
+    terms
+        .iter()
+        .map(|t| {
+            let mut s = 0;
+            if name.contains(t) {
+                s += 4;
+            }
+            if desc.contains(t) {
+                s += 2;
+            }
+            if body.contains(t) {
+                s += 1;
+            }
+            s
+        })
+        .sum()
+}
+
 /// Rank `entries` against a free-text query.
 ///
 /// Scoring is deliberately dumb — whole-word matching, weighted by field — and
@@ -743,30 +770,12 @@ pub fn rank(entries: Vec<Entry>, query: &str) -> Vec<Hit> {
     let mut hits: Vec<Hit> = entries
         .into_iter()
         .map(|entry| {
-            let score = if terms.is_empty() {
-                0
-            } else {
-                let name = words(&entry.record.name);
-                let desc = words(&entry.record.description);
-                let body = words(&entry.record.body);
-                let relevance: u32 = terms
-                    .iter()
-                    .map(|t| {
-                        let mut s = 0;
-                        if name.contains(t) {
-                            s += 4;
-                        }
-                        if desc.contains(t) {
-                            s += 2;
-                        }
-                        if body.contains(t) {
-                            s += 1;
-                        }
-                        s
-                    })
-                    .sum();
-                relevance * entry.weight()
-            };
+            let score = relevance(
+                &terms,
+                &entry.record.name,
+                &entry.record.description,
+                &entry.record.body,
+            ) * entry.weight();
             Hit { entry, score }
         })
         .collect();

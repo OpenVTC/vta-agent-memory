@@ -49,6 +49,11 @@ pub struct FakeMemoryKeyspace {
     /// `(context, key, value)`. Lets a test land a save in the window between a
     /// store's read and its conditional write.
     pub race: Mutex<Option<(String, String, String)>>,
+    /// Data Rooms, for recall across them (#34): room id → the entries
+    /// `rooms/keys/read/0.2` answers with, each with its `key`.
+    pub rooms: Mutex<BTreeMap<String, Vec<Value>>>,
+    /// Rooms whose host cannot be reached.
+    pub unreachable: Mutex<Vec<String>>,
 }
 
 impl FakeMemoryKeyspace {
@@ -99,6 +104,10 @@ impl LoopbackSink for FakeMemoryKeyspace {
             .lock()
             .unwrap()
             .push((type_uri.to_string(), payload.clone()));
+
+        if type_uri.contains("/rooms/keys/") {
+            return self.room_task(type_uri, payload);
+        }
 
         let context_id = field(payload, "contextId")?;
         if let Some(granted) = self.granted.lock().unwrap().as_ref() {
@@ -212,6 +221,113 @@ impl LoopbackSink for FakeMemoryKeyspace {
             ))),
         }
     }
+}
+
+impl FakeMemoryKeyspace {
+    /// `rooms/keys/browse/0.4` and `rooms/keys/read/0.2`, as the member's VTA
+    /// answers them once it has fetched from the host and opened the bodies.
+    fn room_task(&self, type_uri: &str, payload: &Value) -> Result<Value, VtaError> {
+        let room_id = field(payload, "roomId")?;
+        if self
+            .unreachable
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == room_id)
+        {
+            return Err(VtaError::Rejected {
+                code: "rooms/keys/read:hostUnreachable".into(),
+                message: "the host did not answer".into(),
+                details: None,
+            });
+        }
+        let rooms = self.rooms.lock().unwrap();
+        let Some(records) = rooms.get(room_id) else {
+            return Err(VtaError::Rejected {
+                code: "rooms/keys/read:notAMember".into(),
+                message: "no group state for this room".into(),
+                details: None,
+            });
+        };
+        let verification = json!({ "priorRoots": "notChecked" });
+        if type_uri.ends_with("/rooms/keys/browse/0.4") {
+            let rows: Vec<Value> = records
+                .iter()
+                .map(|r| {
+                    json!({
+                        "key": r["key"], "version": r["version"], "updatedAt": r["updatedAt"],
+                        "status": r.get("status").cloned().unwrap_or(json!("active")),
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "roomId": room_id, "records": rows, "verification": verification, "complete": true,
+            }));
+        }
+        if type_uri.ends_with("/rooms/keys/read/0.2") {
+            let keys: Vec<&str> = payload["keys"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let mut sealed_at = serde_json::Map::new();
+            let results: Vec<Value> = keys
+                .iter()
+                .map(|k| match records.iter().find(|r| r["key"] == *k) {
+                    Some(r) => {
+                        let mut r = r.clone();
+                        if let Some(at) = r.as_object_mut().and_then(|o| o.remove("sealedAt")) {
+                            sealed_at.insert(k.to_string(), at);
+                        }
+                        r["verification"] = verification.clone();
+                        r
+                    }
+                    None => json!({ "key": k, "error": {
+                        "code": "rooms/keys/read:cannotOpen", "message": "no such record",
+                        "retryable": false,
+                    }}),
+                })
+                .collect();
+            let mut out = json!({ "roomId": room_id, "results": results });
+            if !sealed_at.is_empty() {
+                out["ext"] = json!({ "org.openvtc.rooms": { "sealedAt": sealed_at } });
+            }
+            return Ok(out);
+        }
+        Err(VtaError::Validation(format!(
+            "the rooms fake does not answer `{type_uri}`"
+        )))
+    }
+
+    /// Put a record in `room`, as `rooms/keys/read` will answer it.
+    pub fn room_record(&self, room: &str, entry: Value) {
+        self.rooms
+            .lock()
+            .unwrap()
+            .entry(room.to_string())
+            .or_default()
+            .push(entry);
+    }
+}
+
+/// A sealed room record body signed by `(did, private)` for `(room, key,
+/// version)`, as `rooms/keys/read` returns it opened: base64url `plaintext`.
+pub async fn sealed_body(
+    (did, private): (&str, &str),
+    room: &str,
+    key: &str,
+    version: u64,
+    fields: Value,
+) -> String {
+    use base64::Engine as _;
+    let mut body = json!({ "roomId": room, "key": key, "version": version, "author": did });
+    if let (Some(b), Some(f)) = (body.as_object_mut(), fields.as_object()) {
+        b.extend(f.clone());
+    }
+    let holder = vta_sdk::trust_task_sign::HolderKey::from_did_key(did, private).unwrap();
+    vta_sdk::trust_task_sign::sign_object_for_assertion(&mut body, &holder)
+        .await
+        .unwrap();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&body).unwrap())
 }
 
 /// A fresh `did:key` signer, as the session store would hold for an agent.

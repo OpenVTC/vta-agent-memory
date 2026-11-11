@@ -1,6 +1,6 @@
 [package]
 name = "vta-agent-memory"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.95.0"
 description = "Agentic memory for Claude Code, stored in a Verifiable Trust Agent"
@@ -71,6 +71,9 @@ toml = "1.1"
 # render mints a fresh random nonce from the OS RNG — never a time seed.
 # Already in the graph transitively; named here because we call it directly.
 getrandom = "0.4"
+# A sealed room record's body arrives base64url (`rooms/keys/read`), and is
+# verified here, so it is decoded here (#34). Already in the graph.
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
