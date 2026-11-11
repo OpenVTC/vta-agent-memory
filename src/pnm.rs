@@ -103,7 +103,15 @@ impl PnmConfig {
     ///
     /// `$PNM_CONFIG_DIR` overrides, for a non-standard install.
     pub fn default_dir() -> anyhow::Result<PathBuf> {
-        if let Ok(d) = std::env::var("PNM_CONFIG_DIR")
+        Self::dir_from(std::env::var("PNM_CONFIG_DIR").ok())
+    }
+
+    /// [`default_dir`](Self::default_dir), given the value of
+    /// `$PNM_CONFIG_DIR`. Split out so the override can be tested without
+    /// setting a process-wide environment variable under a parallel test
+    /// runner — which is what made the default-dir test flaky.
+    fn dir_from(override_dir: Option<String>) -> anyhow::Result<PathBuf> {
+        if let Some(d) = override_dir
             && !d.is_empty()
         {
             return Ok(PathBuf::from(d));
@@ -339,11 +347,17 @@ vta_did = "did:key:zVta"
 
     #[test]
     fn the_config_dir_can_be_overridden() {
-        // Safety: single-threaded test, and the var is removed immediately.
-        unsafe { std::env::set_var("PNM_CONFIG_DIR", "/tmp/elsewhere") };
-        let dir = PnmConfig::default_dir().unwrap();
-        unsafe { std::env::remove_var("PNM_CONFIG_DIR") };
-        assert_eq!(dir, PathBuf::from("/tmp/elsewhere"));
+        // Through `dir_from`, not `set_var`: tests run in parallel, and a
+        // process-wide override leaked into the default-dir test above.
+        assert_eq!(
+            PnmConfig::dir_from(Some("/tmp/elsewhere".into())).unwrap(),
+            PathBuf::from("/tmp/elsewhere")
+        );
+        assert_eq!(
+            PnmConfig::dir_from(Some(String::new())).unwrap(),
+            PnmConfig::dir_from(None).unwrap(),
+            "an empty override is no override"
+        );
     }
 
     #[test]
