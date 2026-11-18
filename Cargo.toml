@@ -73,7 +73,7 @@ toml = "1.1"
 getrandom = "0.4"
 # A sealed room record's body arrives base64url (`rooms/keys/read`), and is
 # verified here, so it is decoded here (#34). Already in the graph.
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 tempfile = "3"
