@@ -2,7 +2,7 @@
 //! and an author on every result, and a room record whose signature does not
 //! hold left out and reported.
 //!
-//! The fake VTA answers `rooms/keys/browse/0.4` and `rooms/keys/read/0.2` as a
+//! The fake VTA answers `rooms/keys/browse/0.6` and `rooms/keys/read/0.2` as a
 //! member's VTA does once it has fetched from the host and opened the bodies,
 //! so what is exercised is this crate's checks on what comes back.
 
@@ -151,7 +151,7 @@ async fn recall_spans_personal_memory_and_rooms_with_provenance_on_each() {
     for (uri, _) in vta.recorded() {
         if uri.contains("/rooms/") {
             assert!(
-                uri.ends_with("/rooms/keys/browse/0.4") || uri.ends_with("/rooms/keys/read/0.2"),
+                uri.ends_with("/rooms/keys/browse/0.6") || uri.ends_with("/rooms/keys/read/0.2"),
                 "recall sent {uri}"
             );
         }

@@ -224,7 +224,7 @@ impl LoopbackSink for FakeMemoryKeyspace {
 }
 
 impl FakeMemoryKeyspace {
-    /// `rooms/keys/browse/0.4` and `rooms/keys/read/0.2`, as the member's VTA
+    /// `rooms/keys/browse/0.6` and `rooms/keys/read/0.2`, as the member's VTA
     /// answers them once it has fetched from the host and opened the bodies.
     fn room_task(&self, type_uri: &str, payload: &Value) -> Result<Value, VtaError> {
         let room_id = field(payload, "roomId")?;
@@ -250,7 +250,7 @@ impl FakeMemoryKeyspace {
             });
         };
         let verification = json!({ "priorRoots": "notChecked" });
-        if type_uri.ends_with("/rooms/keys/browse/0.4") {
+        if type_uri.ends_with("/rooms/keys/browse/0.6") {
             let rows: Vec<Value> = records
                 .iter()
                 .map(|r| {
